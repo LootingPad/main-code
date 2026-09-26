@@ -1,4 +1,6 @@
-# LOOTING — Product & Technical Specification
+# LOOTING — Product & Technical Specification.
+
+#add test
 
 > **Status:** Product Architecture Draft v1.1  
 > **Primary chain:** Robinhood Chain  
