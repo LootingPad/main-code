@@ -34,13 +34,17 @@ export function Account() {
           <NavIcon name="Staking" size={18} />
           Staking
         </Link>
+        <Link href="/analytics">
+          <NavIcon name="Analytics" size={18} />
+          Analytics
+        </Link>
         <Link href="/devlock">
           <NavIcon name="Dev Lock" size={18} />
           Dev Lock
         </Link>
-        <Link href="/analytics">
-          <NavIcon name="Analytics" size={18} />
-          Analytics
+        <Link href="/create-staking">
+          <NavIcon name="Create Staking" size={18} />
+          Create Staking
         </Link>
       </nav>
       {connected && row ? <Profile row={row} address={address} /> : <Empty onConnect={connect} />}
