@@ -1,9 +1,10 @@
 # LOOTING — Product & Technical Specification
 
-> **Status:** Product Architecture Draft v1.0  
+> **Status:** Product Architecture Draft v1.1  
 > **Primary chain:** Robinhood Chain  
 > **Launch engine:** Pons V2 Factory (external dependency; no partnership assumed)  
-> **Product:** Token launchpad + on-chain trading activity rewards + Lucky Box + LOOTING/Stock-token rewards
+> **Product:** Token launchpad + on-chain trading activity rewards + Lucky Box + LOOTING/Stock-token rewards + LOOTING staking + Dev Lock + public Analytics  
+> **v1.1 note:** Aligns the spec with shipped product surfaces (Explore, Token Terminal, Account, Staking, Dev Lock, Analytics, Docs/Litepaper) and launch-economics details already present in the UI.
 
 ---
 
@@ -21,10 +22,13 @@ LOOTING is a Robinhood Chain launchpad whose token launches are created through 
 8. Lucky Boxes can contain LOOTING, tokenized stocks/RWA assets, or no reward depending on the configured reward table.
 9. When a Lucky Box contains LOOTING, the reward contract can execute an on-chain swap and send LOOTING to the winner.
 10. The reward system is designed to create a genuine reward-driven demand loop around LOOTING without relying on artificial volume generation.
+11. LOOTING can be staked (Flexible / 30-day / 90-day locks) as a second utility loop alongside Lucky Box rewards.
+12. Creators can lock or vest supply of coins they launched (Dev Lock) to signal commitment.
+13. Public Analytics and Token Terminal pages make season activity and per-coin trading visible inside LOOTING without requiring the user to leave the product.
 
 The core strategic idea is:
 
-**Pons handles launch/trading infrastructure. LOOTING owns discovery, reward economics, XP, Lucky Boxes, and the user experience.**
+**Pons handles launch/trading infrastructure. LOOTING owns discovery, trading UX, reward economics, XP, Lucky Boxes, staking, Dev Lock, and the user experience.**
 
 ---
 
@@ -108,21 +112,23 @@ Launches a token using LOOTING's launch UI and Pons V2 infrastructure.
 
 Primary goals:
 - Create token quickly.
-- Configure creator economics.
-- Choose Lucky Box allocation from creator fee.
-- Publish project metadata.
-- Track launch performance.
+- Configure creator tax, Lucky Box cut, quote pair, and optional holder fee share.
+- Claim creator fees when the launch routes fees to the creator wallet.
+- Lock or vest creator supply via Dev Lock.
+- Track launch performance on the coin Terminal and Analytics.
 
 ### Trader / Holder
 
-Trades LOOTING-launched tokens anywhere on Robinhood Chain.
+Trades LOOTING-launched tokens anywhere on Robinhood Chain, including through the LOOTING Token Terminal.
 
 Primary goals:
-- Discover new launches.
-- Earn XP.
-- Unlock Lucky Boxes.
-- Improve weekly tier.
+- Discover new launches on Explore and via global search.
+- Trade on the curve or after graduation from the Terminal.
+- Earn XP and unlock Lucky Boxes.
+- Improve weekly tier and climb the leaderboard.
 - Receive LOOTING/Stock/RWA rewards.
+- Stake LOOTING for lock-based yield.
+- Claim holder fee share when a launch enables it.
 
 ### Reward Operator / Protocol Admin
 
@@ -198,31 +204,74 @@ LOOTING must not claim that the Lucky Box fee split is permanently immutable unl
 
 ### Desired creator model
 
-The creator chooses a creator-fee setting within the Pons-supported limits. Example values below are configurable examples, NOT protocol constants:
+The creator chooses a creator-tax setting within Pons-supported limits. Product UI constraints (examples; tunable):
+
+- Tax presets: **1% / 2% / 3%**
+- Custom tax: **0.5%–5%** in **0.1%** steps
+- Lucky Box floor: **at least 0.5% of creator tax**; the box cut can never exceed the tax
+
+Example values below are configurable examples, NOT protocol constants:
 
 ```text
-Creator fee = 1.00%
+Creator tax = 1.00%
 
 Creator share        80%
 Lucky Box share      20%
 
-Effective split:
-Creator              0.80%
+Effective split of tax:
+Creator side         0.80%
 Lucky Box Treasury   0.20%
 ```
 
 Another creator may choose:
 
 ```text
-Creator fee = 1.00%
+Creator tax = 1.00%
 
 Creator share        50%
 Lucky Box share      50%
 
-Effective split:
-Creator              0.50%
+Effective split of tax:
+Creator side         0.50%
 Lucky Box Treasury   0.50%
 ```
+
+### Protocol burn vs creator-side pool
+
+Accrued creator tax on a launch is estimated from market activity (product display uses market cap, tax rate, and curve progress). Of that accrued fee:
+
+```text
+Accrued creator tax
+   ├── 80%  Creator-side pool
+   └── 20%  Protocol burn share (shown in LOOTING)
+```
+
+- The **20% burn share is separate from the Lucky Box cut.**
+- The **creator-side pool** is what the launch form splits between Lucky Boxes and the remaining recipient (creator wallet or holders).
+
+### Holder fee share
+
+After the Lucky Box cut is taken from the tax configuration, the remainder of the creator-side allocation can go to:
+
+1. **Creator wallet** (default), or
+2. **Holders** — claimable from Account / coin Terminal when the launch enables holder share
+
+Turning holder share on does **not** shrink the Lucky Box allocation.
+
+### Quote pair at launch
+
+Buyers spend a quote asset chosen at launch:
+
+- Default: **ETH**
+- Optional stock/RWA quotes (product examples): NVDA, AAPL, TSLA, SPY, AMZN, META, GOOGL, MSFT, COIN
+
+Graduation keeps the same quote pair. This is distinct from stock/RWA tokens used as Lucky Box prizes (§9 / §31).
+
+### Launch form extras
+
+- Optional **initial buy** so the creator can take the first curve position
+- Up to **8 exempt wallets** (e.g. snipe-tax exemptions); duplicates rejected
+- Metadata rules: name length limit, no URLs in description, social handle normalization
 
 ### Important implementation rule
 
@@ -237,6 +286,8 @@ struct LaunchRewardConfig {
     uint16 creatorBps;
     uint16 luckyBoxBps;
     uint16 totalCreatorFeeBps;
+    bool holderShareEnabled;
+    address quoteAsset;
     bytes32 configHash;
 }
 ```
@@ -256,8 +307,9 @@ Pons V2
    ↓
 creatorFeeRecipient = LOOTING Reward Router
    ↓
-   ├── creator allocation → creator claim balance
-   └── Lucky Box allocation → Reward Treasury
+   ├── creator / holder allocation → claimable balances
+   ├── Lucky Box allocation → Reward Treasury
+   └── protocol burn share → burn accounting (per product policy)
 ```
 
 The router must not expose arbitrary withdrawal functionality.
@@ -568,6 +620,14 @@ States:
 - Claimed: the box was opened; show the payout transaction
 - Not eligible: the wallet never bought that token from a LOOTING launch
 
+Filters (product UX):
+
+```text
+All · Unclaimed · In market · Claimed · Not eligible
+```
+
+After a reward is revealed, the user can save/share a branded **share card**. The primary nav label for this surface is **Lucky Boxes** (route may still be `/rewards`).
+
 ### Box detail modal
 
 Before opening:
@@ -691,6 +751,8 @@ LootingSeasonConfig
 LootingLOOTINGRewardExecutor
 LootingStockRewardAdapter
 LootingEmergencyController
+LootingStaking
+LootingDevLock
 ```
 
 ### LootingLaunchRegistry
@@ -771,6 +833,29 @@ Inputs:
 
 Must never allow arbitrary calldata target injection.
 
+### LootingStaking
+
+Custodies staked LOOTING and pays staking rewards.
+
+Product lock options:
+
+- Flexible
+- 30 days
+- 90 days
+
+Longer locks receive higher advertised rates. Stake / unstake / claim must be wallet-scoped and reconstructable from events.
+
+### LootingDevLock
+
+Locks or vests creator supply of LOOTING-launched tokens.
+
+Modes:
+
+- **Time lock** — full unlock at a future timestamp
+- **Vesting** — cliff + vesting length + release cadence (daily / weekly / monthly)
+
+Only the locking wallet (or authorized operator) can claim vested / unlocked amounts. Locked balances must not be withdrawable early.
+
 ---
 
 ## 17. Contract Invariants
@@ -818,6 +903,14 @@ No arbitrary external recipient override from non-authorized roles.
 ### Swap invariant
 
 LOOTING reward executor cannot spend more than the box's assigned reward budget.
+
+### Dev Lock invariant
+
+Locked or unvested amounts cannot be withdrawn before the schedule allows. Claimed amount never exceeds vested amount.
+
+### Staking invariant
+
+Unstake and reward claim must respect the selected lock terms and never over-pay claimable rewards.
 
 ---
 
@@ -1159,80 +1252,140 @@ POST /api/admin/token/approve
 ### Primary navigation
 
 ```text
-Discover
+Explore
 Launch
-Rewards
+Lucky Boxes
 Leaderboard
-Profile
 ```
 
-### Discover
+### Secondary navigation
 
-- New
-- Trending
-- Graduating
-- High volume
-- Reward-rich
-- LOOTING launches
+```text
+Staking
+Dev Lock
+Analytics
+Account
+```
+
+### Side / support
+
+```text
+Docs (intro + detailed guide)
+Litepaper
+X / Telegram (external)
+```
+
+Optional header strip: when the connected wallet created launches with claimable creator fees, show a **creator fee claim** control above the market.
+
+### Explore (market home)
+
+Former “Discover” surface. Product name is **Explore**.
+
+- Boards: New Pair, Almost Graduate, Migrate, Movers, Trending
+- Time windows: Latest, 5m, 1h, 6h, 24h, 48h
+- Layout: table or grid
+- Columns / cards: coin, sparkline, market cap, ATH, age, txns, 24h volume, box figure, 1h / 24h move
+- Live header tape: symbol, market cap, 1h change
+
+### Global search
+
+- Header search field or **Ctrl / Cmd + K**
+- Match by name, ticker, or contract address
+- Sort: relevance, market cap, volume, newest, oldest
+- Filters: age (all / 24h / 7d), phase (all / still on curve / graduated)
+- Selecting a row opens the coin Terminal; submitting the query applies it on Explore
 
 ### Launch
 
 Creator flow:
 
-1. Token details
-2. Pons V2 launch settings
-3. Creator fee
-4. Lucky Box allocation
-5. Review economics
+1. Token details (name, ticker, logo, description, socials)
+2. Creator tax + Lucky Box cut
+3. Quote pair (ETH or stock ticker)
+4. Holder share toggle + optional recipient / exemptions / initial buy
+5. Review economics (including protocol burn vs creator-side pool)
 6. Wallet sign
 7. Launch
-8. Success / share page
+8. Success / share → coin Terminal
 
-### Rewards
+### Token Terminal
 
-- XP
-- Tier
-- Boxes
-- Reward history
-- Season countdown
-- odds disclosure
+Each coin has a dedicated page:
+
+- Price, market cap, curve progress, volume, traders, fee split (creator side vs Lucky Box)
+- Buy / sell on the curve with amount presets
+- Order modes: Instant / Market / Limit (product UX)
+- Trade settings: slippage, gas, priority, optional MEV protection, TP/SL
+- Holders list + recent transactions
+- Connected wallet PnL when holding
+- Creator and holder fee claim when eligible
+- Graduation keeps the launch quote pair
+
+### Lucky Boxes
+
+- XP, tier, boxes, reward history, season countdown, odds disclosure
+- Status filters and share card after reveal
 
 ### Leaderboard
 
-- weekly XP ranking
-- wallet shortened
-- tier badge
-- qualified trade count
-- current reward stats
+- Weekly XP ranking, shortened wallet, tier badge, qualified trade count, reward stats
+- Paginated board (e.g. 20 rows per page)
+- Global #1–#3 trophy treatment persists across pages
+- Connected wallet **You** card with rank jump and row highlight
 
----
+### Account
+
+Wallet hub (product name **Account**, not a social Profile):
+
+- Season XP, tier progress toward next tier, lifetime XP / boxes / trades / rewards
+- Trade history on LOOTING launches with jump-to-coin
+- Shortcuts to Staking, Dev Lock, Analytics
+- Empty / connect prompt when no wallet is linked
+- Identity is the address only
+
+### Staking / Dev Lock / Analytics
+
+Dedicated product pages — see §§54–56.
+
+### Docs / Litepaper
+
+In-app product rules and narrative docs so users can understand fees, boxes, graduation, and the launch window without leaving LOOTING.
 
 ## 24. Creator Launch Flow
 
 ### Step 1 — Token metadata
 
-- name
+- name (product limit: 32 characters; letters, numbers, spaces)
 - ticker
 - logo
-- description
-- socials
+- description (no URLs)
+- socials (X, Telegram, Discord, Farcaster; leading `@` on X stripped)
 
 ### Step 2 — Launch configuration
 
 LOOTING displays Pons-supported parameters without pretending to own Pons mechanics.
 
-### Step 3 — Reward configuration
+Product extras at this step:
+
+- Quote pair: ETH (default) or a stock ticker from the allowlist
+- Optional initial buy
+- Up to 8 snipe-tax exemption wallets
+
+### Step 3 — Reward / fee configuration
 
 Example UI:
 
 ```text
-Creator Fee: 1.00%
+Creator tax: 1.00%   (presets 1 / 2 / 3% or custom 0.5–5%)
 
-Your share       [ 80% ]
-Lucky Box share  [ 20% ]
+Lucky Box cut        [ ≥ 0.5% of tax ]
+Remainder recipient  Creator wallet  |  Holders
 
 Estimated Lucky Box funding per $100k volume:
 $200
+
+Accrued-fee display:
+  80% creator-side pool · 20% protocol burn (LOOTING)
 ```
 
 The exact estimation must account for the actual Pons fee semantics in the deployed version.
@@ -1241,11 +1394,14 @@ The exact estimation must account for the actual Pons fee semantics in the deplo
 
 Show:
 
-- total creator fee
-- creator allocation
-- Lucky Box allocation
+- total creator tax
+- Lucky Box allocation (floor enforced)
+- creator vs holder remainder
+- protocol burn share (display)
+- quote pair + graduation pair notice
 - reward program status
 - external Pons dependency notice
+- launch-window snipe tax notice (§57)
 
 ### Step 5 — Sign launch transaction
 
@@ -1253,7 +1409,7 @@ LOOTING frontend calls the configured Pons V2 Factory.
 
 ### Step 6 — Confirm and register
 
-Backend waits for finalized launch transaction and stores the launch metadata.
+Backend waits for finalized launch transaction and stores the launch metadata, including quote pair, holder-share flag, and reward split snapshot.
 
 ---
 
@@ -1862,13 +2018,16 @@ Deliverable:
 Build:
 
 - wallet connect
-- creator launch form
+- creator launch form (tax, Lucky Box cut, quote pair, holder share, exemptions, initial buy)
 - Pons V2 adapter
 - launch registry
+- Explore market board + global search
+- Token Terminal (buy/sell UX)
 - launch pages
 - Pons event indexer
 - external trade indexing
 - LOOTING launch listing
+- Docs / Litepaper shells
 
 No Lucky Box funds yet.
 
@@ -1878,13 +2037,14 @@ No Lucky Box funds yet.
 
 Build:
 
-- wallet profiles
+- wallet profiles / Account hub
 - trade normalization
 - qualifying-trade rules
 - XP engine
 - weekly seasons
 - Bronze/Silver/Gold
-- leaderboard
+- leaderboard (pagination + You card)
+- public Analytics (season aggregates)
 - anti-duplication
 
 Deliverable:
@@ -1937,10 +2097,27 @@ Build:
 - reward budget management
 - reward display metadata
 - asset risk metadata
+- stock quote pairs at launch (product already surfaces these)
 
 Deliverable:
 
-**RWA Lucky Box rewards**
+**RWA Lucky Box rewards + quote-pair support**
+
+---
+
+## Phase 5b — Staking & Dev Lock
+
+Build:
+
+- LOOTING staking contracts (Flexible / 30 / 90)
+- stake / unstake / claim flows
+- Dev Lock time-lock + vesting contracts
+- creator lock UX wired to on-chain schedules
+- Analytics staking aggregates from chain/indexer
+
+Deliverable:
+
+**On-chain LOOTING utility beyond Lucky Boxes**
 
 ---
 
@@ -1992,12 +2169,16 @@ MVP should focus on:
 
 ```text
 Pons launch
++ Explore / search / Token Terminal
 + trade indexer
 + XP
 + weekly season
 + Lucky Box
 + LOOTING reward
++ Account / Leaderboard / Analytics (read)
 ```
+
+Staking and Dev Lock UIs may ship as product surfaces early, but on-chain staking/vesting settlement can follow Phase 5b once the reward loop is live.
 
 ---
 
@@ -2154,14 +2335,19 @@ Pons provides the launch/trading rail.
 
 LOOTING provides:
 
-- discovery
+- discovery (Explore + search)
+- in-app Token Terminal trading UX
 - XP
 - seasons
 - Lucky Boxes
+- LOOTING staking
+- Dev Lock (creator supply commitment)
+- public Analytics
 - LOOTING utility
-- stock/RWA rewards
+- stock/RWA rewards (as box prizes and as optional launch quote pairs)
 - reward transparency
 - user retention loop
+- Docs / Litepaper in product
 
 ---
 
@@ -2214,7 +2400,13 @@ LOOTING XP / seasons
             +
 LOOTING Lucky Boxes
             +
+LOOTING staking
+            +
+LOOTING Dev Lock
+            +
 LOOTING/RWA reward economy
+            +
+LOOTING discovery / Terminal / Analytics UX
 ```
 
 ---
@@ -2314,4 +2506,181 @@ The Pons V2 integration assumptions in this document are based on review of the 
 The deployed addresses, enabled launch gate, exact deployed bytecode, and current Robinhood Chain runtime configuration must be verified independently before mainnet.
 
 This document is a product/engineering specification, not a legal opinion or a security audit.
+
+---
+
+## 54. Dev Lock
+
+### Purpose
+
+Creators lock or vest supply of coins they launched to signal that tokens are committed on a schedule. Dev Lock is **separate from** Lucky Boxes and staking.
+
+### Modes
+
+**Time lock**
+
+- Full amount unlocks at a chosen future date
+- Product presets: 30 / 90 / 180 / 365 days, or custom date
+
+**Vesting**
+
+- Cliff (e.g. none / 30 / 90 days)
+- Vesting length (e.g. 6 months / 1 year / 2 years)
+- Release cadence: daily / weekly / monthly
+- Claimable amount = vested − already claimed
+
+### Product rules
+
+- User selects a coin (typically from launches they created) and an amount from wallet balance
+- Lock schedule is visible after creation
+- Claim / release returns unlocked tokens to the wallet
+- Early withdrawal of locked / unvested tokens is not allowed
+
+### UX surface
+
+Route: `/devlock`  
+Nav: secondary group (Staking, Dev Lock, Analytics, Account)
+
+---
+
+## 55. LOOTING Staking
+
+### Purpose
+
+Second LOOTING utility loop: stake LOOTING from the wallet and earn lock-based rewards, independent of Lucky Box openings.
+
+### Lock options (product)
+
+| Lock | Role |
+|---|---|
+| Flexible | Lowest rate; no fixed term |
+| 30 days | Mid rate |
+| 90 days | Highest rate |
+
+Rates are season/config parameters, not immutable constants.
+
+### Actions
+
+- Stake
+- Unstake (subject to lock rules)
+- Claim rewards to wallet
+- Wallet-scoped reward history
+
+### Relationship to Analytics
+
+Public Analytics surfaces protocol staking totals by lock length (Flexible / 30 / 90) and daily staking charts.
+
+### UX surface
+
+Route: `/staking`
+
+---
+
+## 56. Public Analytics
+
+### Purpose
+
+Season-level dashboard for the protocol — **not** a single-wallet page (that is Account). Distinct from ops Observability (§34).
+
+### Content
+
+- Volume, launch count, traders (24h / all-time toggle)
+- Creator-fee vs Lucky Box funding split with top launches
+- Protocol staking totals by lock length
+- Daily charts: volume, new launches, staking (histogram with hover/focus values)
+
+### UX surface
+
+Route: `/analytics`
+
+---
+
+## 57. Pons Launch-Window Snipe Tax
+
+### Product rule
+
+On Pons V2, early **second-zero** buys in the launch window face a snipe tax:
+
+```text
+Starts at 99%
+Decays linearly to 0% over ~3 seconds
+Then normal tax rules apply
+```
+
+### What it does NOT change
+
+- Lucky Box eligibility remains: qualifying buy → exit → open
+- A snipe-taxed buy that still qualifies as a BUY still creates a box under the normal rules
+- Creator tax / Lucky Box / burn splits still apply after the window
+
+### UX
+
+Surface the short notice on Launch review, Token Terminal, Docs, and Litepaper so users understand early-entry cost.
+
+Exemptions: up to 8 wallets can be listed at launch as snipe-tax exempt (product form).
+
+---
+
+## 58. Token Terminal (product detail)
+
+Complements §23. The Terminal is the primary in-app trading surface for a single launch.
+
+### Must show
+
+- Market facts: price, mcap, curve progress or graduated state, volume, traders
+- Fee split visualization (creator side vs Lucky Box; burn share where displayed)
+- Quote pair from launch
+- Holders + recent fills
+- Connected wallet position / PnL when holding
+
+### Trading UX
+
+- Buy and sell against the bonding curve while progress < 100%
+- After graduation, trading continues in the launch quote pair via the graduated venue
+- Amount presets and Instant / Market / Limit modes as product affordances
+- Advanced settings: slippage, gas, priority fee, optional MEV protection, take-profit / stop-loss
+
+### Claims
+
+- Creator fee claim when the connected wallet is the fee recipient
+- Holder fee claim when the launch enabled holder share and the wallet is eligible
+
+External venues (GMGN, Axiom, Trojan, aggregators) remain valid (§3.2). The Terminal does not replace “trade anywhere”; it adds a first-party path.
+
+---
+
+## 59. Explore & Search (product detail)
+
+### Explore boards
+
+```text
+New Pair · Almost Graduate · Migrate · Movers · Trending
+```
+
+Time windows and table/grid layouts are first-class filters, not optional polish.
+
+### Search dialog
+
+- Opens from the header or keyboard shortcut
+- Pagination of results (product: eight per page with previous/next)
+- Opening a result navigates to `/token/:address`
+- Submitting the query lands on Explore with the query applied
+
+---
+
+## 60. Docs & Litepaper
+
+### Docs intro
+
+Short product orientation: connect wallet, Explore, Launch, Terminal, Lucky Boxes, seasons, Account.
+
+### Detailed guide
+
+Operational how-to covering wallet identity, Explore/search, launch form constraints, trading, Lucky Box states, Season XP tiers, leaderboard pagination, Analytics, fee/burn model, and graduation / launch-window rules.
+
+### Litepaper
+
+Narrative product economics: fee accrual display, 80/20 creator-side vs protocol burn, holder share, and launch-window snipe tax — without replacing this engineering specification.
+
+These surfaces are part of the product IA so rules are user-visible, not only developer-facing.
 
