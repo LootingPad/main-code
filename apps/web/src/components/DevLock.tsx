@@ -150,6 +150,242 @@ function claimableAmount(lock: Lock) {
   return Math.max(0, vestedAmount(lock) - lock.claimed);
 }
 
+function lockModeLabel(mode: Mode) {
+  return mode === "time" ? "Time-based" : "Vesting";
+}
+
+function lockStatusLine(lock: Lock) {
+  const vested = vestedAmount(lock);
+  const left = lock.amount - vested;
+  if (lock.mode === "time") {
+    return left > 0
+      ? `Unlocks ${formatDate(lock.unlock)} · ${daysBetween(NOW, lock.unlock)} days`
+      : `Unlocked ${formatDate(lock.unlock)}`;
+  }
+  if (vested <= 1) {
+    return lock.cliff > lock.start
+      ? `Cliff until ${formatDate(lock.cliff)}`
+      : `Vests through ${formatDate(lock.unlock)}`;
+  }
+  return `${formatTokens(vested)} unlocked · ends ${formatDate(lock.unlock)}`;
+}
+
+function LockShareCard({ lock, onClose }: { lock: Lock; onClose: () => void }) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [note, setNote] = useState("");
+  const vested = vestedAmount(lock);
+  const progress = lock.amount > 0 ? vested / lock.amount : 0;
+  const modeLabel = lockModeLabel(lock.mode);
+  const status = lockStatusLine(lock);
+  const amountLabel = `${formatTokens(lock.amount - lock.claimed)} ${lock.symbol}`;
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    let cancel = false;
+    const mark = new Image();
+    const scene = new Image();
+    mark.src = "/logo-wordmark.png";
+    scene.src = "/sharecard-bg.png";
+
+    const paint = () => {
+      if (cancel) return;
+      if (!mark.complete || !scene.complete) return;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+      const width = 1920;
+      const height = 1080;
+      const pixel = 2;
+      canvas.width = width * pixel;
+      canvas.height = height * pixel;
+      ctx.setTransform(pixel, 0, 0, pixel, 0, 0);
+
+      ctx.fillStyle = "#09090b";
+      ctx.fillRect(0, 0, width, height);
+
+      if (scene.naturalWidth > 0) {
+        ctx.drawImage(scene, 0, 0, scene.naturalWidth, scene.naturalHeight, 0, 0, width, height);
+        const fade = ctx.createLinearGradient(60, 0, 1020, 0);
+        fade.addColorStop(0, "rgba(9, 9, 11, 0)");
+        fade.addColorStop(0.22, "rgba(9, 9, 11, 0.04)");
+        fade.addColorStop(0.46, "rgba(9, 9, 11, 0.18)");
+        fade.addColorStop(0.68, "rgba(9, 9, 11, 0.48)");
+        fade.addColorStop(0.86, "rgba(9, 9, 11, 0.82)");
+        fade.addColorStop(1, "#09090b");
+        ctx.fillStyle = fade;
+        ctx.fillRect(60, 0, width - 60, height);
+        const floor = ctx.createLinearGradient(0, 980, 0, height);
+        floor.addColorStop(0, "rgba(9, 9, 11, 0)");
+        floor.addColorStop(1, "rgba(9, 9, 11, 0.72)");
+        ctx.fillStyle = floor;
+        ctx.fillRect(0, 980, width, height - 980);
+      }
+
+      const family = getComputedStyle(document.body).fontFamily;
+      ctx.textBaseline = "top";
+
+      const logoH = 58;
+      const logoW = mark.naturalWidth > 0 ? (mark.naturalWidth / mark.naturalHeight) * logoH : 0;
+      if (logoW > 0) ctx.drawImage(mark, width - 88 - logoW, 72, logoW, logoH);
+
+      const centerX = 1460;
+      ctx.textAlign = "center";
+
+      const kicker = "Dev Lock";
+      const title = `$${lock.symbol}`;
+      const meta = `${modeLabel}  ·  ${Math.round(progress * 100)}% unlocked`;
+      const detail = status;
+      const cta = "Locked on LOOTING";
+
+      let titleSize = 108;
+      ctx.font = `700 ${titleSize}px ${family}`;
+      while (ctx.measureText(title).width > 760 && titleSize > 64) {
+        titleSize -= 2;
+        ctx.font = `700 ${titleSize}px ${family}`;
+      }
+
+      const amountSize = 56;
+      const metaSize = 28;
+      const detailSize = 26;
+      const kickerSize = 30;
+      const ctaSize = 34;
+      const barW = 520;
+      const barH = 14;
+      const blockH = kickerSize + 18 + titleSize + 18 + amountSize + 28 + metaSize + 18 + detailSize + 36 + barH + 40 + ctaSize;
+      let y = Math.round((height - blockH) / 2) + 8;
+
+      ctx.fillStyle = "#ccff00";
+      ctx.font = `650 ${kickerSize}px ${family}`;
+      ctx.fillText(kicker, centerX, y);
+      y += kickerSize + 18;
+
+      ctx.fillStyle = "#f5f5f5";
+      ctx.font = `700 ${titleSize}px ${family}`;
+      ctx.fillText(title, centerX, y);
+      y += titleSize + 18;
+
+      ctx.fillStyle = "#ccff00";
+      ctx.font = `700 ${amountSize}px ${family}`;
+      ctx.fillText(amountLabel, centerX, y);
+      y += amountSize + 28;
+
+      ctx.fillStyle = "#9a9aa2";
+      ctx.font = `500 ${metaSize}px ${family}`;
+      ctx.fillText(meta, centerX, y);
+      y += metaSize + 18;
+
+      ctx.fillStyle = "#d4d4d8";
+      ctx.font = `500 ${detailSize}px ${family}`;
+      ctx.fillText(detail, centerX, y);
+      y += detailSize + 36;
+
+      const barX = centerX - barW / 2;
+      ctx.fillStyle = "rgba(255, 255, 255, 0.12)";
+      roundRect(ctx, barX, y, barW, barH, 7);
+      ctx.fill();
+      if (progress > 0) {
+        ctx.fillStyle = "#ccff00";
+        roundRect(ctx, barX, y, Math.max(barH, barW * Math.min(1, progress)), barH, 7);
+        ctx.fill();
+      }
+      y += barH + 40;
+
+      ctx.fillStyle = "#f5f5f5";
+      ctx.font = `600 ${ctaSize}px ${family}`;
+      ctx.fillText(cta, centerX, y);
+
+      ctx.textBaseline = "alphabetic";
+      ctx.font = `500 24px ${family}`;
+      ctx.fillStyle = "#b4b4bc";
+      ctx.textAlign = "right";
+      ctx.fillText("lootingpad.com  |  Robinhood Chain", width - 72, 1032);
+    };
+
+    mark.onload = paint;
+    scene.onload = paint;
+    mark.onerror = paint;
+    scene.onerror = paint;
+    paint();
+
+    return () => {
+      cancel = true;
+    };
+  }, [amountLabel, lock.symbol, modeLabel, progress, status]);
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  async function share() {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png"));
+    if (!blob) return;
+    const file = new File([blob], `looting-${lock.symbol.toLowerCase()}-lock.png`, { type: "image/png" });
+    const payload = {
+      files: [file],
+      title: "LOOTING Dev Lock",
+      text: `Dev Lock $${lock.symbol}: ${amountLabel} · ${modeLabel}`,
+    };
+    if (navigator.canShare?.(payload)) {
+      try {
+        await navigator.share(payload);
+        setNote("Shared");
+        return;
+      } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError") return;
+      }
+    }
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = file.name;
+    link.click();
+    URL.revokeObjectURL(url);
+    setNote("Image saved");
+  }
+
+  return (
+    <div className="devlock-share-overlay" role="dialog" aria-modal="true" aria-label="Share Dev Lock" onClick={onClose}>
+      <div className="devlock-share-sheet sheet" onClick={(event) => event.stopPropagation()}>
+        <header>
+          <div>
+            <p className="kicker">Share card</p>
+            <h2>
+              ${lock.symbol} · {modeLabel}
+            </h2>
+          </div>
+          <button type="button" className="devlock-share-close" onClick={onClose} aria-label="Close">
+            Close
+          </button>
+        </header>
+        <canvas ref={canvasRef} className="share-canvas" aria-label={`Dev Lock share card for $${lock.symbol}`} />
+        <div className="claim-actions">
+          <button type="button" className="claim-btn claim-all" onClick={share}>
+            Share image
+          </button>
+        </div>
+        {note ? <p className="page-note">{note}</p> : null}
+      </div>
+    </div>
+  );
+}
+
+function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {
+  const radius = Math.min(r, w / 2, h / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + radius, y);
+  ctx.arcTo(x + w, y, x + w, y + h, radius);
+  ctx.arcTo(x + w, y + h, x, y + h, radius);
+  ctx.arcTo(x, y + h, x, y, radius);
+  ctx.arcTo(x, y, x + w, y, radius);
+  ctx.closePath();
+}
+
 export function DevLock() {
   const { connected, address, connect } = useWallet();
   const [mode, setMode] = useState<Mode>("time");
@@ -163,6 +399,7 @@ export function DevLock() {
   const [balances, setBalances] = useState(startBalances);
   const [locks, setLocks] = useState(seedLocks);
   const [notice, setNotice] = useState("");
+  const [shareLock, setShareLock] = useState<Lock | null>(null);
   const [tokenOpen, setTokenOpen] = useState(false);
   const [tokenUp, setTokenUp] = useState(false);
   const tokenRef = useRef<HTMLDivElement>(null);
@@ -267,7 +504,7 @@ export function DevLock() {
     );
   };
 
-  const release = (lock: Lock) => {
+  const claim = (lock: Lock) => {
     const payout = claimableAmount(lock);
     if (payout <= 0) return;
     setBalances((current) => ({ ...current, [lock.symbol]: (current[lock.symbol] ?? 0) + payout }));
@@ -279,7 +516,7 @@ export function DevLock() {
         return [{ ...item, claimed }];
       }),
     );
-    setNotice(`Released ${formatTokens(payout)} ${lock.symbol} back to the wallet.`);
+    setNotice(`Claimed ${formatTokens(payout)} ${lock.symbol} back to the wallet.`);
   };
 
   const schedule = scheduleParts(mode, cliffDays, lengthDays);
@@ -485,9 +722,9 @@ export function DevLock() {
                 <em>Across {locks.length} {locks.length === 1 ? "position" : "positions"}</em>
               </article>
               <article className="sheet">
-                <span>Released</span>
+                <span>Unlocked</span>
                 <strong>{formatTokens(released)}</strong>
-                <em>{waiting > 0 ? `${formatTokens(waiting)} ready` : "Nothing waiting"}</em>
+                <em>{waiting > 0 ? `${formatTokens(waiting)} ready to claim` : "Nothing waiting"}</em>
               </article>
               <article className="sheet">
                 <span>Wallet</span>
@@ -506,7 +743,6 @@ export function DevLock() {
                 {locks.map((lock) => {
                   const vested = vestedAmount(lock);
                   const claimable = claimableAmount(lock);
-                  const left = lock.amount - vested;
                   const progress = lock.amount > 0 ? (vested / lock.amount) * 100 : 0;
                   return (
                     <li key={lock.id}>
@@ -515,30 +751,25 @@ export function DevLock() {
                         <div>
                           <b>
                             ${lock.symbol}
-                            <em>{lock.mode === "time" ? "Time-based" : "Vesting"}</em>
+                            <em>{lockModeLabel(lock.mode)}</em>
                           </b>
-                          <span>
-                            {lock.mode === "time"
-                              ? left > 0
-                                ? `Unlocks ${formatDate(lock.unlock)} · ${daysBetween(NOW, lock.unlock)} days`
-                                : `Unlocked ${formatDate(lock.unlock)}`
-                              : vested <= 1
-                                ? lock.cliff > lock.start
-                                  ? `Cliff until ${formatDate(lock.cliff)}`
-                                  : `Releases through ${formatDate(lock.unlock)}`
-                                : `${formatTokens(vested)} released · ends ${formatDate(lock.unlock)}`}
-                          </span>
+                          <span>{lockStatusLine(lock)}</span>
                         </div>
                         <strong>{formatTokens(lock.amount - lock.claimed)}</strong>
                       </div>
                       <i className="devlock-bar slim" aria-hidden>
                         <span className="release" style={{ width: `${progress}%` }} />
                       </i>
-                      {claimable > 1 ? (
-                        <button type="button" className="devlock-release" onClick={() => release(lock)}>
-                          Release {formatTokens(claimable)}
+                      <div className="devlock-actions">
+                        {claimable > 1 ? (
+                          <button type="button" className="devlock-claim" onClick={() => claim(lock)}>
+                            Claim {formatTokens(claimable)}
+                          </button>
+                        ) : null}
+                        <button type="button" className="devlock-share" onClick={() => setShareLock(lock)}>
+                          Share
                         </button>
-                      ) : null}
+                      </div>
                     </li>
                   );
                 })}
@@ -560,6 +791,7 @@ export function DevLock() {
           </button>
         </section>
       )}
+      {shareLock ? <LockShareCard lock={shareLock} onClose={() => setShareLock(null)} /> : null}
     </div>
   );
 }

@@ -23,7 +23,7 @@ The app serves on http://localhost:3000.
 
 | Path | Contents |
 | --- | --- |
-| `apps/web/src/app` | Routes: explore, create, token terminal, rewards, leaderboard, account, analytics, staking, dev lock, docs |
+| `apps/web/src/app` | Routes: explore, create, token terminal, rewards, leaderboard, account, analytics, staking, create staking, dev lock, docs |
 | `apps/web/src/components` | Shell, wallet context and the per-section UI |
 | `apps/web/src/lib` | Mock market data, fee model, draft storage, launch window |
 | `LOOTING_PRODUCT_SPEC.md` | Product and technical specification |

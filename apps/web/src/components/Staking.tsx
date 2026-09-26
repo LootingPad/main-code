@@ -1,42 +1,31 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import { LOOTING_PRICE_USD } from "@/lib/fees";
-import { formatUsd } from "@/lib/mock";
+import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  eventAprRange,
+  formatStakingDate,
+  formatStakingTokens,
+  lockLabel,
+  lockRate,
+  publicStakingEvents,
+  seedStakingPositions,
+  STAKING_LOCK_OPTIONS,
+  type StakingEvent,
+  type StakingLockId,
+  type StakingPosition,
+} from "@/lib/staking-events";
+import { shortAddress } from "@/lib/mock";
+import { SlidingTabs } from "./SlidingTabs";
+import { TokenLogo } from "./TokenLogo";
 import { useWallet } from "./Wallet";
 
-const LOCKS = [
-  { id: "flex", label: "Flexible", rate: 8.4 },
-  { id: "30", label: "30 days", rate: 14.2 },
-  { id: "90", label: "90 days", rate: 22.0 },
-] as const;
-
-type LockId = (typeof LOCKS)[number]["id"];
-
-const startBalance = 1_840_000;
-const startStaked = 620_000;
-const startClaimable = 18_420;
-
-const history = [
-  { when: "6h ago", amount: 420, note: "Flexible rewards" },
-  { when: "1d ago", amount: 1_180, note: "30 day rewards" },
-  { when: "3d ago", amount: 980, note: "30 day rewards" },
-  { when: "7d ago", amount: 2_140, note: "Claimed to wallet" },
-];
+type Tab = "events" | "positions";
 
 const YEAR_SECONDS = 365 * 24 * 60 * 60;
 const EARN_PACE = 360;
 
-function formatLoot(value: number) {
-  return `${Math.round(value).toLocaleString("en-US")} LOOTING`;
-}
-
 function formatLive(value: number) {
   return value.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-}
-
-function lootUsd(value: number) {
-  return formatUsd(value * LOOTING_PRICE_USD);
 }
 
 function earnPerSecond(stakedAmount: number, rate: number) {
@@ -45,37 +34,71 @@ function earnPerSecond(stakedAmount: number, rate: number) {
 
 export function Staking() {
   const { connected, connect } = useWallet();
+  const [tab, setTab] = useState<Tab>("events");
+  const [events] = useState(publicStakingEvents);
+  const [positions, setPositions] = useState(seedStakingPositions);
+  const [activeEventId, setActiveEventId] = useState<string | null>(null);
+  const [activePositionId, setActivePositionId] = useState(seedStakingPositions[0]?.id ?? null);
   const [side, setSide] = useState<"stake" | "unstake">("stake");
-  const [lock, setLock] = useState<LockId>("30");
+  const [lock, setLock] = useState<StakingLockId>("30");
   const [amount, setAmount] = useState("50000");
-  const [balance, setBalance] = useState(startBalance);
-  const [staked, setStaked] = useState(startStaked);
-  const [banked, setBanked] = useState(startClaimable);
-  const [elapsed, setElapsed] = useState(0);
+  const [balances, setBalances] = useState<Record<string, number>>({
+    VAULT: 1_200_000,
+    HARBOR: 640_000,
+    THREAD: 480_000,
+    LANTERN: 220_000,
+    KEY: 910_000,
+  });
   const [notice, setNotice] = useState("");
-  const bankedRef = useRef(startClaimable);
+  const [elapsed, setElapsed] = useState(0);
+  const bankedRef = useRef(0);
   const anchorRef = useRef(0);
   const perSecRef = useRef(0);
 
-  const lockRate = LOCKS.find((item) => item.id === lock)?.rate ?? LOCKS[0].rate;
-  const perSec = earnPerSecond(staked, lockRate);
-  const claimable = banked + elapsed * perSec;
-  const perMinute = perSec * 60;
+  const activeEvent = useMemo(() => {
+    if (activeEventId) return events.find((item) => item.id === activeEventId) ?? null;
+    if (activePositionId) {
+      const position = positions.find((item) => item.id === activePositionId);
+      return position ? (events.find((item) => item.id === position.eventId) ?? null) : null;
+    }
+    return null;
+  }, [activeEventId, activePositionId, events, positions]);
+
+  const activePosition = positions.find((item) => item.id === activePositionId) ?? null;
+  const targetEvent =
+    activeEvent ?? (activePosition ? (events.find((item) => item.id === activePosition.eventId) ?? null) : null);
+  const symbol = targetEvent?.symbol ?? activePosition?.symbol ?? "VAULT";
+  const availableLocks = targetEvent?.locks ?? STAKING_LOCK_OPTIONS.map((item) => item.id);
+  const selectedLock = availableLocks.includes(lock) ? lock : (availableLocks[0] as StakingLockId);
+  const rate = lockRate(selectedLock);
+  const walletBalance = balances[symbol] ?? 0;
+  const stakedAmount = activePosition?.amount ?? 0;
+  const cap = side === "stake" ? walletBalance : stakedAmount;
   const parsed = Number(amount.replace(/,/g, ""));
   const value = Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
-  const cap = side === "stake" ? balance : staked;
-  const ready = connected && value > 0 && value <= cap;
+  const ready = connected && Boolean(targetEvent) && value > 0 && value <= cap;
+
+  const totalStaked = positions.reduce((sum, item) => sum + item.amount, 0);
+  const marketStaked = events.reduce((sum, item) => sum + item.staked, 0);
+  const livePosition = activePosition;
+  const perSec = livePosition ? earnPerSecond(livePosition.amount, lockRate(livePosition.lock)) : 0;
+  const liveClaimable = livePosition ? livePosition.claimable + bankedRef.current + elapsed * perSec : 0;
+
+  useEffect(() => {
+    if (!availableLocks.includes(lock) && availableLocks[0]) {
+      setLock(availableLocks[0] as StakingLockId);
+    }
+  }, [availableLocks, lock]);
 
   useEffect(() => {
     const now = performance.now();
     if (anchorRef.current) {
       bankedRef.current += ((now - anchorRef.current) / 1000) * perSecRef.current;
-      setBanked(bankedRef.current);
     }
     anchorRef.current = now;
     perSecRef.current = perSec;
     setElapsed(0);
-  }, [perSec]);
+  }, [perSec, activePositionId]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -84,9 +107,28 @@ export function Staking() {
     return () => window.clearInterval(timer);
   }, []);
 
+  const openStake = (event: StakingEvent) => {
+    setActiveEventId(event.id);
+    const existing = positions.find((item) => item.eventId === event.id);
+    setActivePositionId(existing?.id ?? null);
+    setSide("stake");
+    setLock((event.locks[0] as StakingLockId) ?? "30");
+    setAmount("");
+    setNotice("");
+    setTab("positions");
+  };
+
+  const selectPosition = (position: StakingPosition) => {
+    setActivePositionId(position.id);
+    setActiveEventId(position.eventId);
+    setLock(position.lock);
+    setSide("stake");
+    setAmount("");
+    setNotice("");
+  };
+
   const fill = (share: number) => {
-    const next = Math.floor(cap * share);
-    setAmount(String(next));
+    setAmount(String(Math.floor(cap * share)));
     setNotice("");
   };
 
@@ -95,18 +137,46 @@ export function Staking() {
       connect();
       return;
     }
-    if (!ready) {
+    if (!targetEvent || !ready) {
       setNotice(value > cap ? "Amount is above the available balance." : "Enter an amount above 0.");
       return;
     }
+
     if (side === "stake") {
-      setBalance((current) => current - value);
-      setStaked((current) => current + value);
-      setNotice(`Staked ${formatLoot(value)} on the ${LOCKS.find((item) => item.id === lock)?.label.toLowerCase()} lock.`);
-    } else {
-      setStaked((current) => current - value);
-      setBalance((current) => current + value);
-      setNotice(`Unstaked ${formatLoot(value)} back to the wallet.`);
+      setBalances((current) => ({ ...current, [symbol]: (current[symbol] ?? 0) - value }));
+      const existing = positions.find((item) => item.eventId === targetEvent.id && item.lock === selectedLock);
+      if (existing) {
+        setPositions((current) =>
+          current.map((item) => (item.id === existing.id ? { ...item, amount: item.amount + value } : item)),
+        );
+        setActivePositionId(existing.id);
+      } else {
+        const next: StakingPosition = {
+          id: `${targetEvent.id}-${selectedLock}-${positions.length + 1}`,
+          eventId: targetEvent.id,
+          address: targetEvent.address,
+          symbol: targetEvent.symbol,
+          name: targetEvent.name,
+          amount: value,
+          lock: selectedLock,
+          claimable: 0,
+          started: Date.now(),
+        };
+        setPositions((current) => [next, ...current]);
+        setActivePositionId(next.id);
+      }
+      setNotice(`Staked ${formatStakingTokens(value)} ${symbol} on the ${lockLabel(selectedLock).toLowerCase()} lock.`);
+    } else if (activePosition) {
+      setBalances((current) => ({ ...current, [symbol]: (current[symbol] ?? 0) + value }));
+      setPositions((current) =>
+        current.flatMap((item) => {
+          if (item.id !== activePosition.id) return [item];
+          const nextAmount = item.amount - value;
+          if (nextAmount <= 0) return [];
+          return [{ ...item, amount: nextAmount }];
+        }),
+      );
+      setNotice(`Unstaked ${formatStakingTokens(value)} ${symbol} back to the wallet.`);
     }
     setAmount("");
   };
@@ -116,14 +186,16 @@ export function Staking() {
       connect();
       return;
     }
-    const payout = bankedRef.current + ((performance.now() - anchorRef.current) / 1000) * perSecRef.current;
+    if (!activePosition) return;
+    const payout =
+      activePosition.claimable + bankedRef.current + ((performance.now() - anchorRef.current) / 1000) * perSecRef.current;
     if (payout <= 0) return;
-    setBalance((current) => current + payout);
-    setNotice(`Claimed ${formatLoot(payout)}.`);
+    setBalances((current) => ({ ...current, [symbol]: (current[symbol] ?? 0) + payout }));
+    setPositions((current) => current.map((item) => (item.id === activePosition.id ? { ...item, claimable: 0 } : item)));
     bankedRef.current = 0;
     anchorRef.current = performance.now();
-    setBanked(0);
     setElapsed(0);
+    setNotice(`Claimed ${formatStakingTokens(payout)} ${symbol}.`);
   };
 
   return (
@@ -131,130 +203,264 @@ export function Staking() {
       <div className="page-head">
         <div>
           <h1 className="explore-title">Staking</h1>
-          <p className="page-note">Lock LOOTING and claim rewards from this wallet.</p>
+          <p className="page-note">Public pools from token creators. Stake in Events, manage what you hold in Positions.</p>
         </div>
+        <SlidingTabs
+          items={[
+            { id: "events", label: "Events" },
+            { id: "positions", label: "Positions" },
+          ]}
+          value={tab}
+          onChange={(next) => {
+            setTab(next);
+            setNotice("");
+          }}
+          ariaLabel="Staking views"
+        />
       </div>
 
-      <div className="staking-layout">
-        <section className="sheet staking-form">
-          <div className="staking-side" role="tablist" aria-label="Stake or unstake">
-            <button type="button" className={side === "stake" ? "on" : ""} onClick={() => setSide("stake")}>
-              Stake
-            </button>
-            <button type="button" className={side === "unstake" ? "on" : ""} onClick={() => setSide("unstake")}>
-              Unstake
-            </button>
-          </div>
-
-          <div className="staking-balance">
-            <span>{side === "stake" ? "Wallet" : "Staked"}</span>
-            <b>{formatLoot(cap)}</b>
-          </div>
-
-          <label className="staking-amount">
-            <span>Amount</span>
-            <input
-              value={amount}
-              inputMode="decimal"
-              placeholder="0"
-              aria-label="LOOTING amount"
-              onChange={(event) => {
-                setAmount(event.target.value.replace(/[^\d.]/g, ""));
-                setNotice("");
-              }}
-            />
-            <em>LOOTING</em>
-          </label>
-
-          <div className="staking-chips">
-            {[0.25, 0.5, 0.75, 1].map((share) => (
-              <button key={share} type="button" onClick={() => fill(share)}>
-                {share === 1 ? "Max" : `${share * 100}%`}
-              </button>
-            ))}
-          </div>
-
-          {side === "stake" ? (
-            <div className="staking-locks" role="tablist" aria-label="Lock length">
-              {LOCKS.map((item) => (
-                <button key={item.id} type="button" className={lock === item.id ? "on" : ""} onClick={() => setLock(item.id)}>
-                  <span>{item.label}</span>
-                  <b>{item.rate.toFixed(1)}%</b>
-                </button>
-              ))}
-            </div>
-          ) : null}
-
-          <dl className="staking-preview">
-            <div>
-              <dt>{side === "stake" ? "You lock" : "You receive"}</dt>
-              <dd>{value > 0 ? formatLoot(value) : "—"}</dd>
-            </div>
-            <div>
-              <dt>Value</dt>
-              <dd>{value > 0 ? lootUsd(value) : "—"}</dd>
-            </div>
-            <div>
-              <dt>{side === "stake" ? "Daily earn" : "Reward rate"}</dt>
-              <dd key={side === "stake" ? `${lock}-${Math.floor(value)}` : "unstake"} className={side === "stake" && value > 0 ? "earn-roll" : ""}>
-                {side === "stake" && value > 0 ? `+${formatLive((value * lockRate) / 100 / 365)} / day` : "—"}
-              </dd>
-            </div>
-          </dl>
-
-          {notice ? <p className="staking-notice">{notice}</p> : null}
-
-          <button type="button" className="staking-submit" onClick={submit}>
-            {connected ? (side === "stake" ? "Stake LOOTING" : "Unstake LOOTING") : "Connect"}
-          </button>
-        </section>
-
-        <div className="staking-side-col">
-          <section className="staking-stats">
+      {tab === "events" ? (
+        <>
+          <section className="staking-strip">
             <article className="sheet">
-              <span>Staked</span>
-              <strong>{formatLoot(staked)}</strong>
-              <em>{lootUsd(staked)}</em>
-            </article>
-            <article className={`sheet staking-earn${perSec > 0 ? " is-live" : ""}`}>
-              <header className="earn-head">
-                <span className="earn-live">
-                  {perSec > 0 ? <span className="earn-dot" /> : null}
-                  Claimable
-                </span>
-                <em>{perSec > 0 ? `+${formatLive(perMinute)} / min` : lootUsd(claimable)}</em>
-              </header>
-              <strong>{formatLive(claimable)} LOOTING</strong>
-              <button type="button" className="claim-btn" disabled={claimable <= 0} onClick={claim}>
-                {claimable > 0 ? "Claim" : "Claimed"}
-              </button>
+              <span>Open events</span>
+              <strong>{events.length}</strong>
             </article>
             <article className="sheet">
-              <span>Wallet</span>
-              <strong>{formatLoot(balance)}</strong>
-              <em>{lootUsd(balance)}</em>
+              <span>Total staked</span>
+              <strong>{formatStakingTokens(marketStaked)}</strong>
+            </article>
+            <article className="sheet">
+              <span>Reward pools</span>
+              <strong>{formatStakingTokens(events.reduce((sum, item) => sum + item.reward, 0))}</strong>
             </article>
           </section>
 
-          <section className="sheet staking-history">
-            <header>
-              <h2>Rewards</h2>
-              <span>This wallet</span>
-            </header>
-            <ul>
-              {history.map((row) => (
-                <li key={`${row.when}-${row.amount}`}>
-                  <div>
-                    <b>{row.note}</b>
-                    <span>{row.when}</span>
+          <section className="sheet staking-events">
+            <div className="staking-table-head" aria-hidden>
+              <span>Pool</span>
+              <span>Staked</span>
+              <span>Rewards</span>
+              <span>APR</span>
+              <span />
+            </div>
+            <ul className="staking-event-list">
+              {events.map((event) => (
+                <li key={event.id}>
+                  <div className="staking-event-row">
+                    <div className="staking-event-main">
+                      <TokenLogo symbol={event.symbol} size={34} />
+                      <div>
+                        <b>${event.symbol}</b>
+                        <span>
+                          {event.name} · {shortAddress(event.creator)}
+                        </span>
+                      </div>
+                    </div>
+                    <div className="staking-event-cell">
+                      <strong>{formatStakingTokens(event.staked)}</strong>
+                      <span>{event.stakers} stakers</span>
+                    </div>
+                    <div className="staking-event-cell">
+                      <strong>{formatStakingTokens(event.reward)}</strong>
+                      <span>ends {formatStakingDate(event.ends)}</span>
+                    </div>
+                    <div className="staking-event-cell">
+                      <strong className="apr">{eventAprRange(event)}</strong>
+                      <span>
+                        {event.locks.length} lock{event.locks.length === 1 ? "" : "s"}
+                      </span>
+                    </div>
+                    <button type="button" className="staking-event-go" onClick={() => openStake(event)}>
+                      Stake
+                    </button>
                   </div>
-                  <em className={row.note.startsWith("Claimed") ? "" : "up"}>+{formatLoot(row.amount)}</em>
                 </li>
               ))}
             </ul>
           </section>
+        </>
+      ) : (
+        <div className="staking-layout">
+          <section className="sheet staking-form">
+            {targetEvent ? (
+              <>
+                <div className="staking-form-token">
+                  <TokenLogo symbol={targetEvent.symbol} size={32} />
+                  <div>
+                    <b>${targetEvent.symbol}</b>
+                    <span>
+                      {targetEvent.name} · ends {formatStakingDate(targetEvent.ends)}
+                    </span>
+                  </div>
+                  <em className="staking-form-apr">{eventAprRange(targetEvent)} APR</em>
+                </div>
+
+                <div className="staking-side" role="tablist" aria-label="Stake or unstake">
+                  <button type="button" className={side === "stake" ? "on" : ""} onClick={() => setSide("stake")}>
+                    Stake
+                  </button>
+                  <button
+                    type="button"
+                    className={side === "unstake" ? "on" : ""}
+                    onClick={() => setSide("unstake")}
+                    disabled={!activePosition}
+                  >
+                    Unstake
+                  </button>
+                </div>
+
+                <div className="staking-balance">
+                  <span>{side === "stake" ? "Wallet" : "In position"}</span>
+                  <b>
+                    {formatStakingTokens(cap)} {symbol}
+                  </b>
+                </div>
+
+                <label className="staking-amount">
+                  <span>Amount</span>
+                  <input
+                    value={amount}
+                    inputMode="decimal"
+                    placeholder="0"
+                    aria-label="Stake amount"
+                    onChange={(event) => {
+                      setAmount(event.target.value.replace(/[^\d.]/g, ""));
+                      setNotice("");
+                    }}
+                  />
+                  <em>{symbol}</em>
+                </label>
+
+                <div className="staking-chips">
+                  {[0.25, 0.5, 0.75, 1].map((share) => (
+                    <button key={share} type="button" onClick={() => fill(share)}>
+                      {share === 1 ? "Max" : `${share * 100}%`}
+                    </button>
+                  ))}
+                </div>
+
+                {side === "stake" ? (
+                  <div className="staking-locks" role="tablist" aria-label="Lock length">
+                    {STAKING_LOCK_OPTIONS.filter((item) => availableLocks.includes(item.id)).map((item) => (
+                      <button
+                        key={item.id}
+                        type="button"
+                        className={selectedLock === item.id ? "on" : ""}
+                        onClick={() => setLock(item.id)}
+                      >
+                        <span>{item.label}</span>
+                        <b>{item.rate}%</b>
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
+
+                <dl className="staking-preview">
+                  <div>
+                    <dt>{side === "stake" ? "You lock" : "You receive"}</dt>
+                    <dd>{value > 0 ? `${formatStakingTokens(value)} ${symbol}` : "—"}</dd>
+                  </div>
+                  <div>
+                    <dt>Lock</dt>
+                    <dd>{side === "stake" ? lockLabel(selectedLock) : activePosition ? lockLabel(activePosition.lock) : "—"}</dd>
+                  </div>
+                  <div>
+                    <dt>Daily earn</dt>
+                    <dd>{side === "stake" && value > 0 ? `+${formatLive((value * rate) / 100 / 365)} / day` : "—"}</dd>
+                  </div>
+                </dl>
+
+                {notice ? <p className="staking-notice">{notice}</p> : null}
+
+                <button type="button" className="staking-submit" onClick={submit}>
+                  {connected ? (side === "stake" ? `Stake ${symbol}` : `Unstake ${symbol}`) : "Connect"}
+                </button>
+              </>
+            ) : (
+              <div className="staking-empty">
+                <p>Pick a pool from Events to start a position.</p>
+                <button type="button" className="staking-submit" onClick={() => setTab("events")}>
+                  Browse events
+                </button>
+              </div>
+            )}
+          </section>
+
+          <div className="staking-side-col">
+            <section className="staking-stats">
+              <article className="sheet">
+                <span>Your stake</span>
+                <strong>{formatStakingTokens(totalStaked)}</strong>
+                <em>
+                  {positions.length} position{positions.length === 1 ? "" : "s"}
+                </em>
+              </article>
+              <article className={`sheet staking-earn${perSec > 0 ? " is-live" : ""}`}>
+                <header className="earn-head">
+                  <span className="earn-live">
+                    {perSec > 0 ? <span className="earn-dot" /> : null}
+                    Claimable
+                  </span>
+                  <em>{livePosition ? symbol : "—"}</em>
+                </header>
+                <strong>
+                  {livePosition ? formatLive(liveClaimable) : "0.00"}
+                  {livePosition ? ` ${symbol}` : ""}
+                </strong>
+                <button type="button" className="claim-btn" disabled={!livePosition || liveClaimable <= 0} onClick={claim}>
+                  {liveClaimable > 0 ? "Claim" : "Claimed"}
+                </button>
+              </article>
+            </section>
+
+            <section className="sheet staking-position-list">
+              <header>
+                <h2>Positions</h2>
+                <span>This wallet</span>
+              </header>
+
+              {!connected ? (
+                <div className="staking-empty">
+                  <p>Connect to load positions.</p>
+                  <button type="button" className="staking-submit" onClick={connect}>
+                    Connect
+                  </button>
+                </div>
+              ) : positions.length === 0 ? (
+                <p className="staking-empty-note">No positions yet.</p>
+              ) : (
+                <ul>
+                  {positions.map((position) => {
+                    const selected = position.id === activePositionId;
+                    return (
+                      <li key={position.id}>
+                        <button
+                          type="button"
+                          className={`staking-position-row${selected ? " on" : ""}`}
+                          onClick={() => selectPosition(position)}
+                        >
+                          <TokenLogo symbol={position.symbol} size={30} />
+                          <div>
+                            <b>
+                              ${position.symbol}
+                              <em>{lockLabel(position.lock)}</em>
+                            </b>
+                            <span>
+                              {formatStakingTokens(position.amount)} · {formatStakingTokens(position.claimable)} ready
+                            </span>
+                          </div>
+                          <strong>{lockRate(position.lock)}%</strong>
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </section>
+          </div>
         </div>
-      </div>
+      )}
     </div>
   );
 }

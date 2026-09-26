@@ -2,10 +2,12 @@
 
 #add test
 
-> **Status:** Product Architecture Draft v1.1  
+> **Status:** Product Architecture Draft v1.3  
 > **Primary chain:** Robinhood Chain  
 > **Launch engine:** Pons V2 Factory (external dependency; no partnership assumed)  
-> **Product:** Token launchpad + on-chain trading activity rewards + Lucky Box + LOOTING/Stock-token rewards + LOOTING staking + Dev Lock + public Analytics  
+> **Product:** Token launchpad + on-chain trading activity rewards + Lucky Box + LOOTING/Stock-token rewards + public token staking vaults + Dev Lock + public Analytics  
+> **v1.3 note:** Adds deploy-ready contract specs for Dev Lock and Staking vaults (structs, entrypoints, accounting, events) aligned to the shipped UI so contracts can be implemented from this document + the web app.  
+> **v1.2 note:** Staking is vault-based — Create Staking publishes a new public vault per event; the Staking page lists Events and wallet Positions.  
 > **v1.1 note:** Aligns the spec with shipped product surfaces (Explore, Token Terminal, Account, Staking, Dev Lock, Analytics, Docs/Litepaper) and launch-economics details already present in the UI.
 
 ---
@@ -24,13 +26,14 @@ LOOTING is a Robinhood Chain launchpad whose token launches are created through 
 8. Lucky Boxes can contain LOOTING, tokenized stocks/RWA assets, or no reward depending on the configured reward table.
 9. When a Lucky Box contains LOOTING, the reward contract can execute an on-chain swap and send LOOTING to the winner.
 10. The reward system is designed to create a genuine reward-driven demand loop around LOOTING without relying on artificial volume generation.
-11. LOOTING can be staked (Flexible / 30-day / 90-day locks) as a second utility loop alongside Lucky Box rewards.
-12. Creators can lock or vest supply of coins they launched (Dev Lock) to signal commitment.
-13. Public Analytics and Token Terminal pages make season activity and per-coin trading visible inside LOOTING without requiring the user to leave the product.
+11. Anyone can create a **staking vault** for a LOOTING-launched coin (Create Staking). Each create publishes a new public vault/event with its own reward pool, lock options, and end date.
+12. The public Staking page lists open vaults (Events) and the connected wallet’s stakes (Positions).
+13. Creators can lock or vest supply of coins they launched (Dev Lock) to signal commitment.
+14. Public Analytics and Token Terminal pages make season activity and per-coin trading visible inside LOOTING without requiring the user to leave the product.
 
 The core strategic idea is:
 
-**Pons handles launch/trading infrastructure. LOOTING owns discovery, trading UX, reward economics, XP, Lucky Boxes, staking, Dev Lock, and the user experience.**
+**Pons handles launch/trading infrastructure. LOOTING owns discovery, trading UX, reward economics, XP, Lucky Boxes, staking vaults, Dev Lock, and the user experience.**
 
 ---
 
@@ -117,6 +120,7 @@ Primary goals:
 - Configure creator tax, Lucky Box cut, quote pair, and optional holder fee share.
 - Claim creator fees when the launch routes fees to the creator wallet.
 - Lock or vest creator supply via Dev Lock.
+- Optionally create a public staking vault for the launched coin (Create Staking).
 - Track launch performance on the coin Terminal and Analytics.
 
 ### Trader / Holder
@@ -129,7 +133,8 @@ Primary goals:
 - Earn XP and unlock Lucky Boxes.
 - Improve weekly tier and climb the leaderboard.
 - Receive LOOTING/Stock/RWA rewards.
-- Stake LOOTING for lock-based yield.
+- Browse public staking Events and stake into token vaults; manage Positions.
+- Create staking vaults for LOOTING-launched coins (not limited to the token’s original creator).
 - Claim holder fee share when a launch enables it.
 
 ### Reward Operator / Protocol Admin
@@ -753,7 +758,8 @@ LootingSeasonConfig
 LootingLOOTINGRewardExecutor
 LootingStockRewardAdapter
 LootingEmergencyController
-LootingStaking
+LootingStakingFactory
+LootingStakingVault
 LootingDevLock
 ```
 
@@ -835,28 +841,134 @@ Inputs:
 
 Must never allow arbitrary calldata target injection.
 
-### LootingStaking
+### LootingStakingFactory / LootingStakingVault
 
-Custodies staked LOOTING and pays staking rewards.
+**Factory** creates or registers a **new vault** per Create Staking event (UI: `/create-staking`).
 
-Product lock options:
+**Vault** binds to:
 
-- Flexible
-- 30 days
-- 90 days
+- a LOOTING-launched token (`stakeToken`) registered in `LootingLaunchRegistry`
+- a reward pool funded by the vault creator (same token unless a later version introduces a separate reward token — MVP: same ERC-20)
+- enabled lock options as a bitmask: Flexible / 30 days / 90 days
+- APR bps per enabled lock, snapshotted at create
+- an event end timestamp (`endsAt`)
 
-Longer locks receive higher advertised rates. Stake / unstake / claim must be wallet-scoped and reconstructable from events.
+Recommended factory create signature (conceptual):
+
+```solidity
+function createVault(
+    address stakeToken,
+    uint256 rewardAmount,
+    uint64 endsAt,
+    uint8 lockMask,          // bit0=flex, bit1=30d, bit2=90d
+    uint16[3] calldata aprBps // APR in bps for flex/30/90; 0 if disabled
+) external returns (address vault, uint256 vaultId);
+```
+
+`createVault` must:
+
+1. require `stakeToken` is a registered LOOTING launch
+2. pull `rewardAmount` from `msg.sender` into the new vault
+3. require `endsAt > block.timestamp`
+4. require at least one lock enabled
+5. emit `StakingVaultCreated`
+
+Vault user entrypoints (match Staking → Positions UI):
+
+```solidity
+function stake(uint256 amount, uint8 lockId) external;   // 0=flex, 1=30d, 2=90d
+function unstake(uint256 amount, uint8 lockId) external;
+function claimRewards(uint8 lockId) external returns (uint256 paid);
+```
+
+Views the UI needs:
+
+```solidity
+function vaultInfo() external view returns (...);
+function position(address wallet, uint8 lockId) external view returns (
+    uint256 staked,
+    uint256 rewardDebtOrAccrued,
+    uint64 lockEndsAt
+);
+function pendingRewards(address wallet, uint8 lockId) external view returns (uint256);
+function totalStaked() external view returns (uint256);
+function rewardRemaining() external view returns (uint256);
+```
+
+Unstake rules:
+
+- Flexible: anytime while vault is active (and after event end for withdrawal of principal)
+- 30 / 90: principal locked until `stakeTime + lockDuration`; rewards may still be claimable per accounting policy
+
+Reward accounting (MVP recommendation):
+
+- continuous accrual: `pending ≈ staked * aprBps / 10_000 / secondsPerYear * elapsed`
+- paid rewards decrease `rewardRemaining`
+- if `rewardRemaining` is insufficient, pay only what remains (never revert user principal unstake solely for empty rewards)
+- after `endsAt`, new stakes revert; existing positions may still claim remaining accrued rewards and unstake when locks allow
 
 ### LootingDevLock
 
-Locks or vests creator supply of LOOTING-launched tokens.
+Locks or vests creator supply of LOOTING-launched tokens (UI: `/devlock`).
+
+Authorization (matches UI gate):
+
+- `token` must be registered in `LootingLaunchRegistry`
+- `msg.sender` must be the launch creator for that token (or an explicitly approved operator if added later)
 
 Modes:
 
-- **Time lock** — full unlock at a future timestamp
-- **Vesting** — cliff + vesting length + release cadence (daily / weekly / monthly)
+- **Time lock (`mode = 0`)** — full amount claimable only when `block.timestamp >= unlockAt`
+- **Vesting (`mode = 1`)** — 0 until `cliffAt`; then linear from cliff → `unlockAt`; cadence is metadata for UI schedule display (daily/weekly/monthly) but vesting math is continuous linear unless a stricter discrete schedule is chosen at deploy
 
-Only the locking wallet (or authorized operator) can claim vested / unlocked amounts. Locked balances must not be withdrawable early.
+Recommended structs:
+
+```solidity
+enum DevLockMode { Time, Vest }
+enum DevLockCadence { Day, Week, Month } // UI metadata; optional on-chain
+
+struct DevLockPosition {
+    uint256 id;
+    address owner;
+    address token;
+    DevLockMode mode;
+    uint256 amount;
+    uint256 claimed;
+    uint64 start;
+    uint64 cliff;     // == start for time locks
+    uint64 unlock;
+    DevLockCadence cadence;
+}
+```
+
+Entrypoints:
+
+```solidity
+function createTimeLock(address token, uint256 amount, uint64 unlockAt) external returns (uint256 lockId);
+function createVesting(
+    address token,
+    uint256 amount,
+    uint64 cliffAt,
+    uint64 unlockAt,
+    DevLockCadence cadence
+) external returns (uint256 lockId);
+function claim(uint256 lockId) external returns (uint256 paid);
+function vestedAmount(uint256 lockId) external view returns (uint256);
+function claimableAmount(uint256 lockId) external view returns (uint256);
+```
+
+Claim math (must match UI):
+
+```text
+vested(time) =
+  if now >= unlock → amount
+  if mode == Time OR now <= cliff → 0
+  else → amount * (now - cliff) / (unlock - cliff)
+
+claimable = vested - claimed
+```
+
+`claim` transfers `claimable` of `token` to `owner`, increments `claimed`, and deletes / closes the position when `claimed >= amount`. Share-card generation is **frontend-only** (no contract call).
 
 ---
 
@@ -906,13 +1018,13 @@ No arbitrary external recipient override from non-authorized roles.
 
 LOOTING reward executor cannot spend more than the box's assigned reward budget.
 
+### Staking invariant
+
+Unstake and reward claim must respect the selected vault lock terms and never over-pay that vault’s claimable rewards or funded reward budget. Creating a staking event creates a distinct vault; vaults do not share reward liabilities.
+
 ### Dev Lock invariant
 
 Locked or unvested amounts cannot be withdrawn before the schedule allows. Claimed amount never exceeds vested amount.
-
-### Staking invariant
-
-Unstake and reward claim must respect the selected lock terms and never over-pay claimable rewards.
 
 ---
 
@@ -1206,6 +1318,61 @@ reference_tx_hash
 created_at
 ```
 
+### staking_vaults
+
+```text
+id
+vault_id
+vault_address
+stake_token
+creator_address
+reward_funded
+reward_remaining
+total_staked
+staker_count
+ends_at
+lock_mask
+apr_flex_bps
+apr_30_bps
+apr_90_bps
+status
+create_tx_hash
+created_at
+```
+
+### staking_positions
+
+```text
+id
+vault_id
+wallet_address
+lock_id
+amount
+rewards_claimed
+lock_started_at
+lock_ends_at
+updated_at
+```
+
+### dev_locks
+
+```text
+id
+lock_id
+owner_address
+token_address
+mode
+amount
+claimed
+start_at
+cliff_at
+unlock_at
+cadence
+status
+create_tx_hash
+created_at
+```
+
 ---
 
 ## 22. API Design
@@ -1219,6 +1386,10 @@ GET /api/seasons/current
 GET /api/wallet/:address
 GET /api/wallet/:address/rewards
 GET /api/wallet/:address/lucky-boxes
+GET /api/wallet/:address/staking-positions
+GET /api/wallet/:address/dev-locks
+GET /api/staking/events
+GET /api/staking/events/:vaultId
 GET /api/leaderboard/current
 ```
 
@@ -1229,6 +1400,10 @@ POST /api/launch/prepare
 POST /api/launch/confirm
 GET  /api/creator/:address/launches
 GET  /api/launch/:token/rewards
+POST /api/staking/events/prepare
+POST /api/staking/events/confirm
+POST /api/devlock/prepare
+POST /api/devlock/confirm
 ```
 
 ### Admin / operator
@@ -1260,13 +1435,18 @@ Lucky Boxes
 Leaderboard
 ```
 
-### Secondary navigation
+### Secondary navigation (titled groups)
 
 ```text
-Staking
-Dev Lock
-Analytics
-Account
+Protocol
+  Staking          ← public vault marketplace (Events + Positions)
+  Analytics
+
+Token tools
+  Dev Lock         ← creator supply lock / vest
+  Create Staking   ← publish a new staking vault for a launched coin
+
+Account            ← wallet hub (ungrouped)
 ```
 
 ### Side / support
@@ -1341,13 +1521,22 @@ Wallet hub (product name **Account**, not a social Profile):
 
 - Season XP, tier progress toward next tier, lifetime XP / boxes / trades / rewards
 - Trade history on LOOTING launches with jump-to-coin
-- Shortcuts to Staking, Dev Lock, Analytics
+- Shortcuts to Staking, Create Staking, Dev Lock, Analytics
 - Empty / connect prompt when no wallet is linked
 - Identity is the address only
 
-### Staking / Dev Lock / Analytics
+### Staking
 
-Dedicated product pages — see §§54–56.
+Public staking marketplace — see §55.
+
+Tabs:
+
+- **Events** — list of open staking vaults created via Create Staking
+- **Positions** — connected wallet’s stakes across those vaults (stake / unstake / claim)
+
+### Create Staking / Dev Lock / Analytics
+
+Dedicated product pages — see §§54–56 and §55a.
 
 ### Docs / Litepaper
 
@@ -1753,9 +1942,35 @@ event RewardClaimed(uint256 indexed boxId, address indexed wallet);
 event LootingRewardPurchased(uint256 indexed boxId, uint256 quoteIn, uint256 lootingOut);
 event SeasonActivated(uint64 indexed seasonId, bytes32 configHash);
 event RewardProgramPaused(address indexed token, bytes32 reason);
+
+// Staking vaults (Create Staking / Events / Positions)
+event StakingVaultCreated(
+    uint256 indexed vaultId,
+    address indexed vault,
+    address indexed stakeToken,
+    address creator,
+    uint256 rewardAmount,
+    uint64 endsAt,
+    uint8 lockMask
+);
+event Staked(uint256 indexed vaultId, address indexed wallet, uint8 lockId, uint256 amount);
+event Unstaked(uint256 indexed vaultId, address indexed wallet, uint8 lockId, uint256 amount);
+event StakingRewardsClaimed(uint256 indexed vaultId, address indexed wallet, uint8 lockId, uint256 amount);
+
+// Dev Lock
+event DevLockCreated(
+    uint256 indexed lockId,
+    address indexed owner,
+    address indexed token,
+    uint8 mode,
+    uint256 amount,
+    uint64 cliff,
+    uint64 unlock
+);
+event DevLockClaimed(uint256 indexed lockId, address indexed owner, uint256 amount);
 ```
 
-These events should make the system reconstructable from chain data.
+These events should make the system reconstructable from chain data. Indexer + frontend Events/Positions/Dev Lock lists should be rebuildable from them.
 
 ---
 
@@ -1771,6 +1986,12 @@ These events should make the system reconstructable from chain data.
 - box lifecycle
 - reward budget accounting
 - swap safety
+- Dev Lock vested/claimable math (time + vest + cliff)
+- Dev Lock early-claim reverts; post-unlock full claim
+- staking vault create pulls rewards and registers vault id
+- stake / unstake lock-duration enforcement (flex vs 30 vs 90)
+- staking reward accrual + rewardRemaining cap
+- no stake after endsAt; principal still withdrawable when locks allow
 
 ### Property tests
 
@@ -1790,6 +2011,18 @@ always holds.
 
 ```text
 claimed reward cannot be claimed again
+```
+
+always holds.
+
+```text
+devLock.claimed <= vested(lock) <= lock.amount
+```
+
+always holds.
+
+```text
+sum(staking rewards paid for vault) <= vault.rewardFunded
 ```
 
 always holds.
@@ -2107,19 +2340,20 @@ Deliverable:
 
 ---
 
-## Phase 5b — Staking & Dev Lock
+## Phase 5b — Staking Vaults & Dev Lock
 
 Build:
 
-- LOOTING staking contracts (Flexible / 30 / 90)
-- stake / unstake / claim flows
+- staking vault factory / registry (Create Staking → new vault per event)
+- per-vault reward accounting and lock options (Flexible / 30 / 90)
+- public Events list + wallet Positions stake / unstake / claim
 - Dev Lock time-lock + vesting contracts
 - creator lock UX wired to on-chain schedules
-- Analytics staking aggregates from chain/indexer
+- Analytics aggregates across public vaults
 
 Deliverable:
 
-**On-chain LOOTING utility beyond Lucky Boxes**
+**On-chain token staking vaults + Dev Lock beyond Lucky Boxes**
 
 ---
 
@@ -2180,7 +2414,7 @@ Pons launch
 + Account / Leaderboard / Analytics (read)
 ```
 
-Staking and Dev Lock UIs may ship as product surfaces early, but on-chain staking/vesting settlement can follow Phase 5b once the reward loop is live.
+Staking and Dev Lock UIs may ship as product surfaces early, but on-chain vault factory / per-vault settlement and Dev Lock can follow Phase 5b once the reward loop is live.
 
 ---
 
@@ -2342,7 +2576,7 @@ LOOTING provides:
 - XP
 - seasons
 - Lucky Boxes
-- LOOTING staking
+- LOOTING staking vaults (Create Staking → public Events / Positions)
 - Dev Lock (creator supply commitment)
 - public Analytics
 - LOOTING utility
@@ -2402,7 +2636,7 @@ LOOTING XP / seasons
             +
 LOOTING Lucky Boxes
             +
-LOOTING staking
+LOOTING staking vaults
             +
 LOOTING Dev Lock
             +
@@ -2535,23 +2769,75 @@ Creators lock or vest supply of coins they launched to signal that tokens are co
 
 - User selects a coin (typically from launches they created) and an amount from wallet balance
 - Lock schedule is visible after creation
-- Claim / release returns unlocked tokens to the wallet
+- Unlocked / vested amounts are **Claim**ed back to the wallet (product label is Claim, not Release)
 - Early withdrawal of locked / unvested tokens is not allowed
+
+### Share card
+
+Each lock row has a **Share** action. Sharing opens a branded share card (canvas OG image) with:
+
+- token symbol
+- lock mode (Time-based / Vesting)
+- locked amount
+- status line (unlock date or vesting progress)
+- unlock progress bar
+- LOOTING branding / lootingpad.com footer
+
+The user can share via the system share sheet or download the PNG. This mirrors Lucky Box share-card UX but is scoped to Dev Lock positions.
+
+### On-chain mapping
+
+See §16 (`LootingDevLock`) and §61 (deploy acceptance). Share card is off-chain only.
 
 ### UX surface
 
 Route: `/devlock`  
-Nav: secondary group (Staking, Dev Lock, Analytics, Account)
+Nav: Token tools group
 
 ---
 
-## 55. LOOTING Staking
+## 55. Public Staking (Events & Positions)
 
 ### Purpose
 
-Second LOOTING utility loop: stake LOOTING from the wallet and earn lock-based rewards, independent of Lucky Box openings.
+Public marketplace for **token staking vaults**. Independent of Lucky Boxes. Not a single global LOOTING-only pool — each Create Staking action publishes a **new vault**.
 
-### Lock options (product)
+### Core model
+
+```text
+Create Staking
+      ↓
+New vault registered for a LOOTING-launched token
+      ↓
+Vault appears on Staking → Events
+      ↓
+Wallets stake into that vault
+      ↓
+Positions show per-vault balances + claimable rewards
+```
+
+### Events tab (public)
+
+Lists open vaults with:
+
+- token / pool identity
+- vault creator
+- total staked + staker count
+- reward pool size
+- APR range from enabled locks
+- event end date
+- **Stake** → opens Positions with that vault selected
+
+Summary strip may show open event count, aggregate staked, and aggregate reward pools.
+
+### Positions tab (wallet)
+
+- List of the connected wallet’s positions across vaults
+- Selecting a position drives the stake / unstake form for that vault’s token
+- Claimable rewards for the selected position
+- Empty states: connect wallet, or browse Events if no positions
+
+### Lock options (per vault)
 
 | Lock | Role |
 |---|---|
@@ -2559,22 +2845,59 @@ Second LOOTING utility loop: stake LOOTING from the wallet and earn lock-based r
 | 30 days | Mid rate |
 | 90 days | Highest rate |
 
-Rates are season/config parameters, not immutable constants.
+A vault creator chooses which locks to enable. Rates are config parameters, not immutable constants. Longer locks typically advertise higher rates.
 
 ### Actions
 
-- Stake
-- Unstake (subject to lock rules)
-- Claim rewards to wallet
-- Wallet-scoped reward history
+- Stake into a selected vault
+- Unstake (subject to that vault’s lock rules)
+- Claim rewards to wallet from the selected position
 
 ### Relationship to Analytics
 
-Public Analytics surfaces protocol staking totals by lock length (Flexible / 30 / 90) and daily staking charts.
+Public Analytics may surface aggregate staking across vaults (totals, by lock length, daily charts).
+
+### On-chain mapping
+
+See §16 (`LootingStakingFactory` / `LootingStakingVault`) and §61. Each Events row = one vault; Positions rows = `(wallet, vault, lockId)`.
 
 ### UX surface
 
-Route: `/staking`
+Route: `/staking`  
+Nav: Protocol group
+
+---
+
+## 55a. Create Staking
+
+### Purpose
+
+Publish a **new staking vault** for any LOOTING-launched coin. The vault creator funds the reward pool. Permission is **not** limited to the original token creator — any connected wallet can create an event for a launched coin.
+
+### Create flow
+
+1. Select a LOOTING-launched token
+2. Fund reward pool amount (in that token)
+3. Choose event length (e.g. 30 / 90 / 180 / 365 days)
+4. Enable lock options (Flexible / 30 / 90)
+5. Review and create → new vault ID
+6. Vault appears on Staking → Events
+
+### Product rules
+
+- One create = one new vault (distinct accounting from other vaults)
+- Reward liability is capped by the funded pool for that vault
+- Enabled locks and end date are snapshotted at create time
+- Published vaults are publicly stakeable until the event ends (or is paused by emergency controls)
+
+### On-chain mapping
+
+`createVault` on `LootingStakingFactory` — one successful create = one new vault address + `vaultId` (§61.3).
+
+### UX surface
+
+Route: `/create-staking`  
+Nav: Token tools group
 
 ---
 
@@ -2588,7 +2911,7 @@ Season-level dashboard for the protocol — **not** a single-wallet page (that i
 
 - Volume, launch count, traders (24h / all-time toggle)
 - Creator-fee vs Lucky Box funding split with top launches
-- Protocol staking totals by lock length
+- Aggregate staking across public vaults (by lock length where available)
 - Daily charts: volume, new launches, staking (histogram with hover/focus values)
 
 ### UX surface
@@ -2685,4 +3008,145 @@ Operational how-to covering wallet identity, Explore/search, launch form constra
 Narrative product economics: fee accrual display, 80/20 creator-side vs protocol burn, holder share, and launch-window snipe tax — without replacing this engineering specification.
 
 These surfaces are part of the product IA so rules are user-visible, not only developer-facing.
+
+---
+
+## 61. Deploy Guide — Contracts from Product UI
+
+This section is the checklist for implementing and deploying smart contracts so they line up with the current web UI. Treat the UI routes as acceptance surfaces: if a wallet action exists in the UI, there must be a corresponding on-chain entrypoint (except pure presentation such as share cards).
+
+### 61.1 UI → contract map
+
+| UI surface | Route | On-chain module | Required calls |
+|---|---|---|---|
+| Create Staking | `/create-staking` | `LootingStakingFactory` | `createVault(...)` |
+| Staking → Events | `/staking` (tab Events) | Factory registry + each vault | read `vaultInfo`, lists from events/indexer |
+| Staking → Positions | `/staking` (tab Positions) | `LootingStakingVault` | `stake`, `unstake`, `claimRewards`, `pendingRewards` |
+| Dev Lock form | `/devlock` | `LootingDevLock` | `createTimeLock` / `createVesting` |
+| Dev Lock Claim | `/devlock` list | `LootingDevLock` | `claim(lockId)` |
+| Dev Lock Share | `/devlock` list | **none** | frontend canvas OG only |
+| Launch | `/create` | Pons adapter + `LootingLaunchRegistry` | existing launch flow |
+| Lucky Boxes | `/rewards` | `LootingLuckyBox` + vault/executor | existing reward flow |
+
+### 61.2 Deploy order (recommended)
+
+1. `LootingEmergencyController` (pause roles)
+2. `LootingLaunchRegistry` (tokens that may be locked / vaulted)
+3. `LootingDevLock` (depends on registry for creator checks)
+4. `LootingStakingFactory` + vault implementation / clone template
+5. Wire factory to registry + emergency pause
+6. Indexer subscriptions for new events in §35
+7. Point frontend env to factory + DevLock addresses
+
+### 61.3 Create Staking → new vault (acceptance)
+
+When a user completes Create Staking in the UI:
+
+1. Wallet approves `rewardAmount` of `stakeToken` to the factory (or vault)
+2. `createVault` succeeds and returns `(vault, vaultId)`
+3. `StakingVaultCreated` is emitted
+4. Staking → Events shows the new row after indexer/API refresh
+5. Another wallet can `stake` into that vault from Positions
+6. Reward payouts never exceed the funded `rewardAmount`
+
+Failure cases the UI must surface:
+
+- token not a LOOTING launch
+- reward amount 0 / endsAt in the past / no locks enabled
+- insufficient allowance or balance
+
+### 61.4 Staking Positions (acceptance)
+
+Positions UI expects per `(wallet, vault, lockId)`:
+
+- staked principal
+- lock label + APR
+- pending / claimable rewards
+- ability to stake more (same lock) or unstake when allowed
+- Claim button pays rewards only (principal stays until unstake)
+
+Default product lock ids:
+
+| `lockId` | Label | Duration | Typical APR (example only) |
+|---:|---|---|---|
+| 0 | Flexible | 0 | 8% (800 bps) |
+| 1 | 30 days | 30d | 14% (1400 bps) |
+| 2 | 90 days | 90d | 22% (2200 bps) |
+
+APR values are set per vault at create time (UI may show presets). They are not global protocol constants.
+
+### 61.5 Dev Lock (acceptance)
+
+Create Time-based:
+
+- pull `amount` of creator’s token
+- store unlock timestamp
+- `claimable = 0` until unlock; then full remainder
+
+Create Vesting:
+
+- pull `amount`
+- store `cliff`, `unlock`, cadence metadata
+- claimable follows linear formula in §16
+
+Claim:
+
+- transfers only `claimableAmount`
+- updates `claimed`
+- removes closed locks from “active” lists when fully claimed
+
+Share:
+
+- no transaction; card data is read from lock state + token metadata
+
+Authorization:
+
+- only the launch creator may create Dev Locks for that token (matches UI “coins you launched”)
+
+### 61.6 Storage the indexer/API should mirror
+
+```text
+staking_vaults
+  vault_id, vault_address, stake_token, creator, reward_funded,
+  reward_remaining, total_staked, staker_count, ends_at, lock_mask,
+  apr_flex_bps, apr_30_bps, apr_90_bps, created_at, status
+
+staking_positions
+  vault_id, wallet, lock_id, amount, rewards_claimed, lock_started_at,
+  lock_ends_at, updated_at
+
+dev_locks
+  lock_id, owner, token, mode, amount, claimed, start, cliff, unlock,
+  cadence, created_at, status
+```
+
+### 61.7 Security requirements for these modules
+
+- ReentrancyGuard on stake / unstake / claim / createVault / DevLock claim
+- SafeERC20 for all token moves
+- Pausable via emergency controller on factory create + vault stake
+- No generic owner `withdraw(token,to,amount)` on live vault reward accounting
+- Explicit token decimal handling (do not assume 18)
+- Reject fee-on-transfer / rebasing tokens unless explicitly supported and tested
+- Create Staking and Dev Lock must not accept arbitrary unregistered ERC-20s
+
+### 61.8 Out of scope for these contracts
+
+- Share-card image generation
+- Explore / Analytics chart aggregation (indexer/API)
+- Lucky Box randomness (separate modules)
+- Changing Pons bonding-curve mechanics
+
+### 61.9 Definition of done for vault + Dev Lock deploy
+
+- [ ] Factory creates a distinct vault per Create Staking tx
+- [ ] Events tab can list all vaults from chain/indexer
+- [ ] Positions can stake / unstake / claim against a selected vault + lock
+- [ ] Flexible / 30 / 90 lock rules enforced on-chain
+- [ ] Vault reward paid ≤ reward funded
+- [ ] Dev Lock time + vesting claim math matches UI formula
+- [ ] Non-creators cannot Dev-Lock someone else’s launch token
+- [ ] Pause stops new vault creates and new stakes
+- [ ] All actions emit §35 events
+- [ ] Frontend env wired; mock paths removable behind feature flags
 

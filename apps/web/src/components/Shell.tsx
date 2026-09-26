@@ -15,12 +15,24 @@ const links = [
   { href: "/leaderboard", label: "Leaderboard" },
 ];
 
-const groupLinks = [
-  { href: "/staking", label: "Staking" },
-  { href: "/devlock", label: "Dev Lock" },
-  { href: "/analytics", label: "Analytics" },
-  { href: "/account", label: "Account" },
-];
+const navGroups = [
+  {
+    title: "Protocol",
+    links: [
+      { href: "/staking", label: "Staking" },
+      { href: "/analytics", label: "Analytics" },
+    ],
+  },
+  {
+    title: "Token tools",
+    links: [
+      { href: "/devlock", label: "Dev Lock" },
+      { href: "/create-staking", label: "Create Staking" },
+    ],
+  },
+] as const;
+
+const accountLink = { href: "/account", label: "Account" };
 
 const sideLinks = [
   { href: "https://x.com", label: "X", icon: <XIcon size={20} />, external: true },
@@ -203,20 +215,35 @@ export function Shell({ children }: { children: React.ReactNode }) {
               <span className="nav-label">{link.label}</span>
             </Link>
           ))}
+          {navGroups.map((group) => (
+            <div key={group.title} className="nav-group">
+              <p className="nav-group-title">{group.title}</p>
+              {group.links.map((link) => (
+                <Link
+                  key={link.href}
+                  href={link.href}
+                  title={link.label}
+                  className={`nav-item ${isActive(pathname, link.href) ? "active" : ""}`}
+                >
+                  <span className="nav-glyph">
+                    <NavIcon name={link.label} size={22} />
+                  </span>
+                  <span className="nav-label">{link.label}</span>
+                </Link>
+              ))}
+            </div>
+          ))}
           <div className="nav-group">
-            {groupLinks.map((link) => (
-              <Link
-                key={link.href}
-                href={link.href}
-                title={link.label}
-                className={`nav-item ${isActive(pathname, link.href) ? "active" : ""}`}
-              >
-                <span className="nav-glyph">
-                  <NavIcon name={link.label} size={22} />
-                </span>
-                <span className="nav-label">{link.label}</span>
-              </Link>
-            ))}
+            <Link
+              href={accountLink.href}
+              title={accountLink.label}
+              className={`nav-item ${isActive(pathname, accountLink.href) ? "active" : ""}`}
+            >
+              <span className="nav-glyph">
+                <NavIcon name={accountLink.label} size={22} />
+              </span>
+              <span className="nav-label">{accountLink.label}</span>
+            </Link>
           </div>
         </nav>
         <div className="sidebar-end">

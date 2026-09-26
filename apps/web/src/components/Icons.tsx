@@ -88,6 +88,16 @@ export function DevLockIcon({ size }: IconProps) {
   );
 }
 
+export function CreateStakingIcon({ size }: IconProps) {
+  return (
+    <Frame size={size}>
+      <path d="M12 4.4 18.6 7.8 12 11.2 5.4 7.8 12 4.4Z" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" />
+      <path d="M5.4 12.2 12 15.6l6.6-3.4" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M16.8 17.2v3.6M15 19h3.6" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
+    </Frame>
+  );
+}
+
 export function SearchIcon({ size = 16 }: IconProps) {
   return (
     <Frame size={size}>
@@ -185,6 +195,7 @@ const icons = {
   Analytics: AnalyticsIcon,
   Staking: StakingIcon,
   "Dev Lock": DevLockIcon,
+  "Create Staking": CreateStakingIcon,
   Account: AccountIcon,
 };
 
