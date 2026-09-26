@@ -329,6 +329,74 @@ export const seedStakingPositions: StakingPosition[] = [
   },
 ];
 
+export type StakingHistoryKind = "stake" | "claim" | "unstake";
+
+export type StakingHistoryRow = {
+  id: string;
+  eventId: string;
+  address: string;
+  symbol: string;
+  name: string;
+  kind: StakingHistoryKind;
+  lock: StakingLockId;
+  amount: number;
+  reward: number;
+  at: number;
+};
+
+export const seedStakingHistory: StakingHistoryRow[] = seedStakingPositions
+  .flatMap((position, index) => {
+    const rows: StakingHistoryRow[] = [
+      {
+        id: `${position.id}-stake`,
+        eventId: position.eventId,
+        address: position.address,
+        symbol: position.symbol,
+        name: position.name,
+        kind: "stake",
+        lock: position.lock,
+        amount: position.amount,
+        reward: 0,
+        at: position.started,
+      },
+    ];
+
+    const claimed = Math.round(position.claimable * (0.55 + (index % 3) * 0.12));
+    if (claimed > 0) {
+      rows.push({
+        id: `${position.id}-claim`,
+        eventId: position.eventId,
+        address: position.address,
+        symbol: position.symbol,
+        name: position.name,
+        kind: "claim",
+        lock: position.lock,
+        amount: 0,
+        reward: claimed,
+        at: position.started + Math.max(DAY, Math.floor((STAKING_NOW - position.started) * 0.55)),
+      });
+    }
+
+    if (index % 4 === 2) {
+      const unstaked = Math.round(position.amount * 0.18);
+      rows.push({
+        id: `${position.id}-unstake`,
+        eventId: position.eventId,
+        address: position.address,
+        symbol: position.symbol,
+        name: position.name,
+        kind: "unstake",
+        lock: position.lock,
+        amount: unstaked,
+        reward: Math.round(claimed * 0.15),
+        at: position.started + Math.max(DAY * 2, Math.floor((STAKING_NOW - position.started) * 0.8)),
+      });
+    }
+
+    return rows;
+  })
+  .sort((a, b) => b.at - a.at);
+
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
 export function formatStakingDate(ms: number) {
