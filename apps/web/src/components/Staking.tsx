@@ -1,7 +1,9 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import {
+  DAY,
   eventAprRange,
   formatStakingDate,
   formatStakingTokens,
@@ -10,11 +12,13 @@ import {
   publicStakingEvents,
   seedStakingPositions,
   STAKING_LOCK_OPTIONS,
+  STAKING_NOW,
   type StakingEvent,
   type StakingLockId,
   type StakingPosition,
 } from "@/lib/staking-events";
-import { shortAddress } from "@/lib/mock";
+import { formatCount, formatUsd, launches, shortAddress } from "@/lib/mock";
+import { Pager } from "./Pager";
 import { SlidingTabs } from "./SlidingTabs";
 import { TokenLogo } from "./TokenLogo";
 import { useWallet } from "./Wallet";
@@ -23,6 +27,8 @@ type Tab = "events" | "positions";
 
 const YEAR_SECONDS = 365 * 24 * 60 * 60;
 const EARN_PACE = 360;
+const EVENTS_PER_PAGE = 10;
+const POSITIONS_PER_PAGE = 10;
 
 function formatLive(value: number) {
   return value.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -34,11 +40,12 @@ function earnPerSecond(stakedAmount: number, rate: number) {
 
 export function Staking() {
   const { connected, connect } = useWallet();
+  const searchParams = useSearchParams();
   const [tab, setTab] = useState<Tab>("events");
-  const [events] = useState(publicStakingEvents);
+  const events = publicStakingEvents;
   const [positions, setPositions] = useState(seedStakingPositions);
   const [activeEventId, setActiveEventId] = useState<string | null>(null);
-  const [activePositionId, setActivePositionId] = useState(seedStakingPositions[0]?.id ?? null);
+  const [activePositionId, setActivePositionId] = useState<string | null>(seedStakingPositions[0]?.id ?? null);
   const [side, setSide] = useState<"stake" | "unstake">("stake");
   const [lock, setLock] = useState<StakingLockId>("30");
   const [amount, setAmount] = useState("50000");
@@ -51,9 +58,12 @@ export function Staking() {
   });
   const [notice, setNotice] = useState("");
   const [elapsed, setElapsed] = useState(0);
+  const [eventPage, setEventPage] = useState(1);
+  const [positionPage, setPositionPage] = useState(1);
   const bankedRef = useRef(0);
   const anchorRef = useRef(0);
   const perSecRef = useRef(0);
+  const openedPoolRef = useRef<string | null>(null);
 
   const activeEvent = useMemo(() => {
     if (activeEventId) return events.find((item) => item.id === activeEventId) ?? null;
@@ -79,7 +89,27 @@ export function Staking() {
   const ready = connected && Boolean(targetEvent) && value > 0 && value <= cap;
 
   const totalStaked = positions.reduce((sum, item) => sum + item.amount, 0);
+  const totalStakedUsd = positions.reduce((sum, item) => {
+    const event = events.find((entry) => entry.id === item.eventId);
+    const launch = launches.find((entry) => entry.symbol === item.symbol);
+    const price =
+      launch && launch.priceUsd > 0
+        ? launch.priceUsd
+        : event && event.marketCap > 0
+          ? event.marketCap / 1_000_000_000
+          : 0;
+    return sum + item.amount * price;
+  }, 0);
   const marketStaked = events.reduce((sum, item) => sum + item.staked, 0);
+  const eventPages = Math.max(1, Math.ceil(events.length / EVENTS_PER_PAGE));
+  const safeEventPage = Math.min(eventPage, eventPages);
+  const pagedEvents = events.slice((safeEventPage - 1) * EVENTS_PER_PAGE, safeEventPage * EVENTS_PER_PAGE);
+  const positionPages = Math.max(1, Math.ceil(positions.length / POSITIONS_PER_PAGE));
+  const safePositionPage = Math.min(positionPage, positionPages);
+  const pagedPositions = positions.slice(
+    (safePositionPage - 1) * POSITIONS_PER_PAGE,
+    safePositionPage * POSITIONS_PER_PAGE,
+  );
   const livePosition = activePosition;
   const perSec = livePosition ? earnPerSecond(livePosition.amount, lockRate(livePosition.lock)) : 0;
   const liveClaimable = livePosition ? livePosition.claimable + bankedRef.current + elapsed * perSec : 0;
@@ -117,6 +147,15 @@ export function Staking() {
     setNotice("");
     setTab("positions");
   };
+
+  useEffect(() => {
+    const pool = searchParams.get("pool");
+    if (!pool || openedPoolRef.current === pool) return;
+    const event = events.find((item) => item.id === pool || item.address.toLowerCase() === pool.toLowerCase());
+    if (!event) return;
+    openedPoolRef.current = pool;
+    openStake(event);
+  }, [events, searchParams]);
 
   const selectPosition = (position: StakingPosition) => {
     setActivePositionId(position.id);
@@ -239,13 +278,15 @@ export function Staking() {
           <section className="sheet staking-events">
             <div className="staking-table-head" aria-hidden>
               <span>Pool</span>
+              <span>MCAP</span>
+              <span>Vol 24h</span>
               <span>Staked</span>
               <span>Rewards</span>
               <span>APR</span>
               <span />
             </div>
             <ul className="staking-event-list">
-              {events.map((event) => (
+              {pagedEvents.map((event) => (
                 <li key={event.id}>
                   <div className="staking-event-row">
                     <div className="staking-event-main">
@@ -256,6 +297,14 @@ export function Staking() {
                           {event.name} · {shortAddress(event.creator)}
                         </span>
                       </div>
+                    </div>
+                    <div className="staking-event-cell">
+                      <strong>{formatUsd(event.marketCap)}</strong>
+                      <span>Market cap</span>
+                    </div>
+                    <div className="staking-event-cell">
+                      <strong>{formatUsd(event.volume24h)}</strong>
+                      <span>24h volume</span>
                     </div>
                     <div className="staking-event-cell">
                       <strong>{formatStakingTokens(event.staked)}</strong>
@@ -278,6 +327,9 @@ export function Staking() {
                 </li>
               ))}
             </ul>
+            {events.length > EVENTS_PER_PAGE ? (
+              <Pager page={safeEventPage} pages={eventPages} onChange={setEventPage} />
+            ) : null}
           </section>
         </>
       ) : (
@@ -295,6 +347,66 @@ export function Staking() {
                   </div>
                   <em className="staking-form-apr">{eventAprRange(targetEvent)} APR</em>
                 </div>
+
+                <dl className="staking-vault-stats">
+                  <div>
+                    <dt>Total staked</dt>
+                    <dd>
+                      {formatStakingTokens(targetEvent.staked)} <i>{targetEvent.symbol}</i>
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Stakers</dt>
+                    <dd>{formatCount(targetEvent.stakers)}</dd>
+                  </div>
+                  <div>
+                    <dt>Reward pool</dt>
+                    <dd>{formatStakingTokens(targetEvent.reward)}</dd>
+                  </div>
+                  <div>
+                    <dt>Days left</dt>
+                    <dd>{Math.max(0, Math.ceil((targetEvent.ends - STAKING_NOW) / DAY))}d</dd>
+                  </div>
+                  <div>
+                    <dt>Avg stake</dt>
+                    <dd>
+                      {targetEvent.stakers > 0
+                        ? formatStakingTokens(targetEvent.staked / targetEvent.stakers)
+                        : "—"}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Your share</dt>
+                    <dd>
+                      {(() => {
+                        const yours = positions
+                          .filter((item) => item.eventId === targetEvent.id)
+                          .reduce((sum, item) => sum + item.amount, 0);
+                        if (targetEvent.staked <= 0 || yours <= 0) return "—";
+                        return `${((yours / targetEvent.staked) * 100).toFixed(2)}%`;
+                      })()}
+                    </dd>
+                  </div>
+                </dl>
+
+                <dl className="staking-vault-facts">
+                  <div>
+                    <dt>Duration</dt>
+                    <dd>{targetEvent.durationDays}d</dd>
+                  </div>
+                  <div>
+                    <dt>Market cap</dt>
+                    <dd>{formatUsd(targetEvent.marketCap)}</dd>
+                  </div>
+                  <div>
+                    <dt>Vol 24h</dt>
+                    <dd>{formatUsd(targetEvent.volume24h)}</dd>
+                  </div>
+                  <div>
+                    <dt>Pool CA</dt>
+                    <dd className="ca">{tinyCa(targetEvent.address)}</dd>
+                  </div>
+                </dl>
 
                 <div className="staking-side" role="tablist" aria-label="Stake or unstake">
                   <button type="button" className={side === "stake" ? "on" : ""} onClick={() => setSide("stake")}>
@@ -373,6 +485,8 @@ export function Staking() {
 
                 {notice ? <p className="staking-notice">{notice}</p> : null}
 
+                <div className="staking-form-spacer" aria-hidden />
+
                 <button type="button" className="staking-submit" onClick={submit}>
                   {connected ? (side === "stake" ? `Stake ${symbol}` : `Unstake ${symbol}`) : "Connect"}
                 </button>
@@ -389,13 +503,20 @@ export function Staking() {
 
           <div className="staking-side-col">
             <section className="staking-stats">
-              <article className="sheet">
-                <span>Your stake</span>
-                <strong>{formatStakingTokens(totalStaked)}</strong>
-                <em>
-                  {positions.length} position{positions.length === 1 ? "" : "s"}
-                </em>
-              </article>
+              <div className="staking-stake-pair">
+                <article className="sheet">
+                  <span>Your stake</span>
+                  <strong>{formatStakingTokens(totalStaked)}</strong>
+                  <em>
+                    {positions.length} position{positions.length === 1 ? "" : "s"}
+                  </em>
+                </article>
+                <article className="sheet">
+                  <span>Value Staked</span>
+                  <strong className="staking-stake-usd">{formatUsd(totalStakedUsd)}</strong>
+                  <em>Total USD</em>
+                </article>
+              </div>
               <article className={`sheet staking-earn${perSec > 0 ? " is-live" : ""}`}>
                 <header className="earn-head">
                   <span className="earn-live">
@@ -417,7 +538,7 @@ export function Staking() {
             <section className="sheet staking-position-list">
               <header>
                 <h2>Positions</h2>
-                <span>This wallet</span>
+                <span>{connected ? `${positions.length} open` : "This wallet"}</span>
               </header>
 
               {!connected ? (
@@ -430,32 +551,43 @@ export function Staking() {
               ) : positions.length === 0 ? (
                 <p className="staking-empty-note">No positions yet.</p>
               ) : (
-                <ul>
-                  {positions.map((position) => {
-                    const selected = position.id === activePositionId;
-                    return (
-                      <li key={position.id}>
-                        <button
-                          type="button"
-                          className={`staking-position-row${selected ? " on" : ""}`}
-                          onClick={() => selectPosition(position)}
-                        >
-                          <TokenLogo symbol={position.symbol} size={30} />
-                          <div>
-                            <b>
-                              ${position.symbol}
-                              <em>{lockLabel(position.lock)}</em>
-                            </b>
-                            <span>
-                              {formatStakingTokens(position.amount)} · {formatStakingTokens(position.claimable)} ready
+                <div className="staking-pos-board">
+                  <div className="staking-pos-head" aria-hidden>
+                    <span>Token</span>
+                    <span>CA</span>
+                    <span>Lock</span>
+                    <span>Staked</span>
+                    <span>Ready</span>
+                    <span>APR</span>
+                  </div>
+                  <ul className="staking-pos-list">
+                    {pagedPositions.map((position) => {
+                      const selected = position.id === activePositionId;
+                      return (
+                        <li key={position.id}>
+                          <button
+                            type="button"
+                            className={`staking-pos-row${selected ? " on" : ""}`}
+                            onClick={() => selectPosition(position)}
+                          >
+                            <span className="staking-pos-token">
+                              <TokenLogo symbol={position.symbol} size={26} />
+                              <b>${position.symbol}</b>
                             </span>
-                          </div>
-                          <strong>{lockRate(position.lock)}%</strong>
-                        </button>
-                      </li>
-                    );
-                  })}
-                </ul>
+                            <span className="staking-pos-ca">{tinyCa(position.address)}</span>
+                            <span className="staking-pos-chip">{lockLabel(position.lock)}</span>
+                            <span className="num">{formatStakingTokens(position.amount)}</span>
+                            <span className="num">{formatStakingTokens(position.claimable)}</span>
+                            <span className="num staking-pos-apr">{lockRate(position.lock)}%</span>
+                          </button>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                  {positions.length > POSITIONS_PER_PAGE ? (
+                    <Pager page={safePositionPage} pages={positionPages} onChange={setPositionPage} />
+                  ) : null}
+                </div>
               )}
             </section>
           </div>
@@ -463,4 +595,8 @@ export function Staking() {
       )}
     </div>
   );
+}
+
+function tinyCa(address: string) {
+  return `${address.slice(0, 4)}…${address.slice(-3)}`;
 }

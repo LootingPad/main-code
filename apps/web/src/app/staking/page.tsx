@@ -1,5 +1,10 @@
+import { Suspense } from "react";
 import { Staking } from "@/components/Staking";
 
 export default function StakingPage() {
-  return <Staking />;
+  return (
+    <Suspense>
+      <Staking />
+    </Suspense>
+  );
 }

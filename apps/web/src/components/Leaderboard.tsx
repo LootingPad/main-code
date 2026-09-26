@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { formatCount, leaderboard, shortAddress } from "@/lib/mock";
+import { Pager } from "./Pager";
 import { useWallet } from "./Wallet";
 import { WalletAvatar } from "./WalletAvatar";
 
@@ -155,26 +156,7 @@ export function Leaderboard() {
           );
         })}
       </ul>
-      {pages > 1 ? (
-        <div className="data-pager">
-          <button type="button" disabled={page === 1} onClick={() => setPage(page - 1)}>
-            Prev
-          </button>
-          {Array.from({ length: pages }, (_, index) => (
-            <button
-              key={index}
-              type="button"
-              className={page === index + 1 ? "on" : ""}
-              onClick={() => setPage(index + 1)}
-            >
-              {index + 1}
-            </button>
-          ))}
-          <button type="button" disabled={page === pages} onClick={() => setPage(page + 1)}>
-            Next
-          </button>
-        </div>
-      ) : null}
+      {pages > 1 ? <Pager page={page} pages={pages} onChange={setPage} /> : null}
     </div>
   );
 }

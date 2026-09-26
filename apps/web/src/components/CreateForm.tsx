@@ -27,7 +27,7 @@ const pairLogos: Record<string, string> = {
 function PairMark({ symbol }: { symbol: string }) {
   const src = pairLogos[symbol];
   if (!src) return null;
-  return <img className="pair-mark" src={src} alt="" />;
+  return <img className="pair-mark" src={src} alt="" decoding="async" />;
 }
 
 function FieldTip({ children }: { children: ReactNode }) {
@@ -312,7 +312,7 @@ export function CreateForm() {
             </label>
             <label className={`upload upload-wide${imageOk ? "" : " is-locked"}`}>
               {image ? (
-                <img src={image} alt="" />
+                <img src={image} alt="" decoding="async" />
               ) : (
                 <>
                   <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
@@ -556,7 +556,7 @@ export function CreateForm() {
         <section className="sheet create-card token-preview" aria-label="Token preview">
           <p className="col-title">Preview</p>
           <div className="preview-hero">
-            {image ? <img src={image} alt="" className="preview-logo" /> : <TokenLogo symbol={ticker || "NEW"} size={64} />}
+            {image ? <img src={image} alt="" className="preview-logo" decoding="async" /> : <TokenLogo symbol={ticker || "NEW"} size={64} />}
             <div className="min-w-0">
               <p className="truncate text-lg font-semibold">{name.trim() || "Coin name"}</p>
               <p className="ticker text-sm text-[var(--muted)]">${ticker || "TICKER"}</p>

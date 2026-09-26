@@ -1,9 +1,11 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { launches } from "@/lib/mock";
+import { CREATE_STAKING_FEE_ETH } from "@/lib/fees";
+import { launches, marketStats } from "@/lib/mock";
 import {
   DAY,
+  eventAprRange,
   formatStakingDate,
   formatStakingTokens,
   publicStakingEvents,
@@ -100,6 +102,8 @@ export function CreateStaking() {
       reward: value,
       staked: 0,
       stakers: 0,
+      marketCap: coin.marketCap,
+      volume24h: marketStats(coin).volume24h,
       durationDays,
       locks: [...locks],
       ends: endsAt,
@@ -226,6 +230,10 @@ export function CreateStaking() {
                     .join(" · ") || "—"}
                 </dd>
               </div>
+              <div>
+                <dt>Create fee</dt>
+                <dd>{CREATE_STAKING_FEE_ETH} ETH</dd>
+              </div>
             </dl>
 
             {notice ? <p className="devlock-notice">{notice}</p> : null}
@@ -233,7 +241,9 @@ export function CreateStaking() {
             <button type="button" className="devlock-submit" onClick={submit}>
               Create staking event
             </button>
-            <p className="devlock-fine">Published events show on the public Staking page so anyone can stake into your pool.</p>
+            <p className="devlock-fine">
+              Creating a vault costs a flat {CREATE_STAKING_FEE_ETH} ETH create fee. Published events show on the public Staking page so anyone can stake into your pool.
+            </p>
           </section>
 
           <div className="devlock-side">
@@ -255,36 +265,63 @@ export function CreateStaking() {
               </article>
             </section>
 
-            <section className="sheet devlock-list">
+            <section className="sheet create-staking-events">
               <header>
-                <h2>Events</h2>
-                <span>This wallet</span>
+                <div>
+                  <h2>Events</h2>
+                  <p className="page-note">Pools you published from this wallet.</p>
+                </div>
+                <span className="create-staking-count">{pools.length}</span>
               </header>
-              {pools.length === 0 ? <p className="devlock-empty-note">No staking events yet.</p> : null}
-              <ul>
-                {pools.map((pool) => (
-                  <li key={pool.id}>
-                    <div className="devlock-row">
-                      <TokenLogo symbol={pool.symbol} size={32} />
-                      <div>
-                        <b>
-                          ${pool.symbol}
-                          <em>{pool.durationDays}d</em>
-                        </b>
-                        <span>
-                          {formatStakingTokens(pool.reward)} rewards · ends {formatStakingDate(pool.ends)}
-                        </span>
-                      </div>
-                      <strong>{pool.locks.length} locks</strong>
-                    </div>
-                    <p className="create-staking-locks">
-                      {STAKING_LOCK_OPTIONS.filter((item) => pool.locks.includes(item.id))
-                        .map((item) => `${item.label} ${item.rate}%`)
-                        .join(" · ")}
-                    </p>
-                  </li>
-                ))}
-              </ul>
+              {pools.length === 0 ? (
+                <p className="devlock-empty-note">No staking events yet.</p>
+              ) : (
+                <ul className="create-staking-pool-list">
+                  {pools.map((pool) => {
+                    const lockOpts = STAKING_LOCK_OPTIONS.filter((item) => pool.locks.includes(item.id));
+                    return (
+                      <li key={pool.id} className="create-staking-pool">
+                        <div className="create-staking-pool-top">
+                          <TokenLogo symbol={pool.symbol} size={36} />
+                          <div className="create-staking-pool-id">
+                            <strong>${pool.symbol}</strong>
+                            <span>{pool.name}</span>
+                          </div>
+                          <em className="create-staking-duration">{pool.durationDays}d</em>
+                        </div>
+                        <dl className="create-staking-pool-stats">
+                          <div>
+                            <dt>Staked</dt>
+                            <dd>{formatStakingTokens(pool.staked)}</dd>
+                          </div>
+                          <div>
+                            <dt>Stakers</dt>
+                            <dd>{pool.stakers}</dd>
+                          </div>
+                          <div>
+                            <dt>Rewards</dt>
+                            <dd>{formatStakingTokens(pool.reward)}</dd>
+                          </div>
+                          <div>
+                            <dt>APR</dt>
+                            <dd className="apr">{eventAprRange(pool)}</dd>
+                          </div>
+                        </dl>
+                        <div className="create-staking-pool-foot">
+                          <span>Ends {formatStakingDate(pool.ends)}</span>
+                          <div className="create-staking-pool-locks">
+                            {lockOpts.map((item) => (
+                              <span key={item.id}>
+                                {item.label} <b>{item.rate}%</b>
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
             </section>
           </div>
         </div>

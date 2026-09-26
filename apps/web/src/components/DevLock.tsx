@@ -1,13 +1,16 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { DEV_LOCK_FEE_ETH } from "@/lib/fees";
 import { launches } from "@/lib/mock";
+import { Pager } from "./Pager";
 import { SlidingTabs } from "./SlidingTabs";
 import { TokenLogo } from "./TokenLogo";
 import { useWallet } from "./Wallet";
 
 const DAY = 24 * 60 * 60 * 1000;
 const NOW = Date.parse("2026-09-26T00:00:00Z");
+const LOCKS_PER_PAGE = 4;
 
 const TIME_PRESETS = [
   { id: "30", label: "30 days", days: 30 },
@@ -175,142 +178,243 @@ function LockShareCard({ lock, onClose }: { lock: Lock; onClose: () => void }) {
   const [note, setNote] = useState("");
   const vested = vestedAmount(lock);
   const progress = lock.amount > 0 ? vested / lock.amount : 0;
+  const unlockedPct = Math.round(progress * 100);
   const modeLabel = lockModeLabel(lock.mode);
-  const status = lockStatusLine(lock);
-  const amountLabel = `${formatTokens(lock.amount - lock.claimed)} ${lock.symbol}`;
+  const daysLeft = daysBetween(NOW, lock.unlock);
+  const unlockLine =
+    daysLeft > 0
+      ? `Unlocks ${formatDate(lock.unlock)} · ${daysLeft} days`
+      : `Unlocked ${formatDate(lock.unlock)}`;
+  const amountLabel = `${formatTokens(lock.amount)} ${lock.symbol}`;
+  const launch = launches.find((item) => item.address === lock.address || item.symbol === lock.symbol);
+  const totalSupply = launch && launch.priceUsd > 0 ? launch.marketCap / launch.priceUsd : 0;
+  const supplyPct = totalSupply > 0 ? (lock.amount / totalSupply) * 100 : 0;
+  const supplyPctLabel =
+    supplyPct >= 10 ? supplyPct.toFixed(1) : supplyPct >= 1 ? supplyPct.toFixed(2) : supplyPct.toFixed(3);
 
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     let cancel = false;
     const mark = new Image();
-    const scene = new Image();
     mark.src = "/logo-wordmark.png";
-    scene.src = "/sharecard-bg.png";
 
-    const paint = () => {
+    const paint = async () => {
       if (cancel) return;
-      if (!mark.complete || !scene.complete) return;
       const ctx = canvas.getContext("2d");
       if (!ctx) return;
+
+      const root = getComputedStyle(document.documentElement);
+      const soraName = root.getPropertyValue("--font-sora").trim() || "Sora";
+      const jakartaName = root.getPropertyValue("--font-jakarta").trim() || "Plus Jakarta Sans";
+      const display = `${soraName}, system-ui, sans-serif`;
+      const sans = `${jakartaName}, system-ui, sans-serif`;
+      try {
+        await document.fonts.ready;
+        await Promise.all([
+          document.fonts.load(`700 128px ${display}`),
+          document.fonts.load(`700 72px ${display}`),
+          document.fonts.load(`700 36px ${display}`),
+          document.fonts.load(`600 30px ${sans}`),
+          document.fonts.load(`500 24px ${sans}`),
+        ]);
+      } catch {
+        /* canvas still paints with fallbacks */
+      }
+      if (cancel) return;
+
       const width = 1920;
       const height = 1080;
-      const pixel = 2;
+      const pixel = Math.max(2, Math.min(3, Math.round(window.devicePixelRatio || 2)));
       canvas.width = width * pixel;
       canvas.height = height * pixel;
+      canvas.style.width = "100%";
+      canvas.style.height = "auto";
       ctx.setTransform(pixel, 0, 0, pixel, 0, 0);
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = "high";
 
-      ctx.fillStyle = "#09090b";
+      // Flat black stage
+      ctx.fillStyle = "#050505";
       ctx.fillRect(0, 0, width, height);
 
-      if (scene.naturalWidth > 0) {
-        ctx.drawImage(scene, 0, 0, scene.naturalWidth, scene.naturalHeight, 0, 0, width, height);
-        const fade = ctx.createLinearGradient(60, 0, 1020, 0);
-        fade.addColorStop(0, "rgba(9, 9, 11, 0)");
-        fade.addColorStop(0.22, "rgba(9, 9, 11, 0.04)");
-        fade.addColorStop(0.46, "rgba(9, 9, 11, 0.18)");
-        fade.addColorStop(0.68, "rgba(9, 9, 11, 0.48)");
-        fade.addColorStop(0.86, "rgba(9, 9, 11, 0.82)");
-        fade.addColorStop(1, "#09090b");
-        ctx.fillStyle = fade;
-        ctx.fillRect(60, 0, width - 60, height);
-        const floor = ctx.createLinearGradient(0, 980, 0, height);
-        floor.addColorStop(0, "rgba(9, 9, 11, 0)");
-        floor.addColorStop(1, "rgba(9, 9, 11, 0.72)");
-        ctx.fillStyle = floor;
-        ctx.fillRect(0, 980, width, height - 980);
-      }
+      // Soft lime wash — wide falloff, no hard edge band
+      const glow = ctx.createRadialGradient(width / 2, height + 120, 80, width / 2, height + 80, 1100);
+      glow.addColorStop(0, "rgba(204, 255, 0, 0.22)");
+      glow.addColorStop(0.22, "rgba(204, 255, 0, 0.1)");
+      glow.addColorStop(0.48, "rgba(204, 255, 0, 0.045)");
+      glow.addColorStop(0.72, "rgba(204, 255, 0, 0.015)");
+      glow.addColorStop(1, "rgba(204, 255, 0, 0)");
+      ctx.fillStyle = glow;
+      ctx.fillRect(0, 0, width, height);
 
-      const family = getComputedStyle(document.body).fontFamily;
-      ctx.textBaseline = "top";
+      const haze = ctx.createLinearGradient(0, height * 0.55, 0, height);
+      haze.addColorStop(0, "rgba(204, 255, 0, 0)");
+      haze.addColorStop(0.55, "rgba(204, 255, 0, 0.03)");
+      haze.addColorStop(1, "rgba(204, 255, 0, 0.08)");
+      ctx.fillStyle = haze;
+      ctx.fillRect(0, height * 0.55, width, height * 0.45);
 
+      // Theme ornaments — lime corner brackets + soft frame
+      const accent = "#ccff00";
+      const corner = 56;
+      const arm = 36;
+      ctx.strokeStyle = "rgba(204, 255, 0, 0.45)";
+      ctx.lineWidth = 2;
+      ctx.lineCap = "square";
+      // top-left
+      ctx.beginPath();
+      ctx.moveTo(corner, corner + arm);
+      ctx.lineTo(corner, corner);
+      ctx.lineTo(corner + arm, corner);
+      ctx.stroke();
+      // top-right
+      ctx.beginPath();
+      ctx.moveTo(width - corner - arm, corner);
+      ctx.lineTo(width - corner, corner);
+      ctx.lineTo(width - corner, corner + arm);
+      ctx.stroke();
+      // bottom-left
+      ctx.beginPath();
+      ctx.moveTo(corner, height - corner - arm);
+      ctx.lineTo(corner, height - corner);
+      ctx.lineTo(corner + arm, height - corner);
+      ctx.stroke();
+      // bottom-right
+      ctx.beginPath();
+      ctx.moveTo(width - corner - arm, height - corner);
+      ctx.lineTo(width - corner, height - corner);
+      ctx.lineTo(width - corner, height - corner - arm);
+      ctx.stroke();
+
+      // Logo — top center
       const logoH = 58;
       const logoW = mark.naturalWidth > 0 ? (mark.naturalWidth / mark.naturalHeight) * logoH : 0;
-      if (logoW > 0) ctx.drawImage(mark, width - 88 - logoW, 72, logoW, logoH);
+      const cx = Math.round(width / 2);
+      if (logoW > 0) ctx.drawImage(mark, Math.round(cx - logoW / 2), 64, logoW, logoH);
 
-      const centerX = 1460;
-      ctx.textAlign = "center";
-
-      const kicker = "Dev Lock";
-      const title = `$${lock.symbol}`;
-      const meta = `${modeLabel}  ·  ${Math.round(progress * 100)}% unlocked`;
-      const detail = status;
-      const cta = "Locked on LOOTING";
-
-      let titleSize = 108;
-      ctx.font = `700 ${titleSize}px ${family}`;
-      while (ctx.measureText(title).width > 760 && titleSize > 64) {
-        titleSize -= 2;
-        ctx.font = `700 ${titleSize}px ${family}`;
-      }
-
-      const amountSize = 56;
-      const metaSize = 28;
-      const detailSize = 26;
-      const kickerSize = 30;
-      const ctaSize = 34;
-      const barW = 520;
-      const barH = 14;
-      const blockH = kickerSize + 18 + titleSize + 18 + amountSize + 28 + metaSize + 18 + detailSize + 36 + barH + 40 + ctaSize;
-      let y = Math.round((height - blockH) / 2) + 8;
-
-      ctx.fillStyle = "#ccff00";
-      ctx.font = `650 ${kickerSize}px ${family}`;
-      ctx.fillText(kicker, centerX, y);
-      y += kickerSize + 18;
-
-      ctx.fillStyle = "#f5f5f5";
-      ctx.font = `700 ${titleSize}px ${family}`;
-      ctx.fillText(title, centerX, y);
-      y += titleSize + 18;
-
-      ctx.fillStyle = "#ccff00";
-      ctx.font = `700 ${amountSize}px ${family}`;
-      ctx.fillText(amountLabel, centerX, y);
-      y += amountSize + 28;
-
-      ctx.fillStyle = "#9a9aa2";
-      ctx.font = `500 ${metaSize}px ${family}`;
-      ctx.fillText(meta, centerX, y);
-      y += metaSize + 18;
-
-      ctx.fillStyle = "#d4d4d8";
-      ctx.font = `500 ${detailSize}px ${family}`;
-      ctx.fillText(detail, centerX, y);
-      y += detailSize + 36;
-
-      const barX = centerX - barW / 2;
-      ctx.fillStyle = "rgba(255, 255, 255, 0.12)";
-      roundRect(ctx, barX, y, barW, barH, 7);
-      ctx.fill();
-      if (progress > 0) {
-        ctx.fillStyle = "#ccff00";
-        roundRect(ctx, barX, y, Math.max(barH, barW * Math.min(1, progress)), barH, 7);
+      // Hairline under logo
+      if (logoW > 0) {
+        ctx.strokeStyle = "rgba(204, 255, 0, 0.35)";
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(cx - 48, 64 + logoH + 18);
+        ctx.lineTo(cx + 48, 64 + logoH + 18);
+        ctx.stroke();
+        ctx.fillStyle = accent;
+        ctx.beginPath();
+        ctx.arc(cx, 64 + logoH + 18, 2.5, 0, Math.PI * 2);
         ctx.fill();
       }
-      y += barH + 40;
 
-      ctx.fillStyle = "#f5f5f5";
-      ctx.font = `600 ${ctaSize}px ${family}`;
-      ctx.fillText(cta, centerX, y);
+      const title = `$${lock.symbol}`;
+      const amountWithDays =
+        daysLeft > 0
+          ? `${amountLabel} / ${supplyPctLabel}% - ${daysLeft} Days`
+          : `${amountLabel} / ${supplyPctLabel}% - Unlocked`;
+      const meta = `${modeLabel} · ${unlockedPct}% unlocked`;
 
+      let titleSize = 128;
+      ctx.font = `700 ${titleSize}px ${display}`;
+      while (ctx.measureText(title).width > 1200 && titleSize > 84) {
+        titleSize -= 2;
+        ctx.font = `700 ${titleSize}px ${display}`;
+      }
+
+      let amountSize = 64;
+      ctx.font = `700 ${amountSize}px ${display}`;
+      while (ctx.measureText(amountWithDays).width > 1400 && amountSize > 42) {
+        amountSize -= 2;
+        ctx.font = `700 ${amountSize}px ${display}`;
+      }
+
+      const kickerSize = 30;
+      const metaSize = 26;
+      const siteSize = 22;
+      const gapAfterKicker = 28;
+      const gapAfterTitle = 36;
+      const iconSize = Math.round(titleSize * 0.62);
+      const iconGap = Math.round(titleSize * 0.16);
+      const stackH = kickerSize + gapAfterKicker + titleSize + gapAfterTitle + amountSize;
+      let y = Math.round((height - stackH) / 2) + 20;
+
+      ctx.shadowColor = "transparent";
+      ctx.shadowBlur = 0;
+      ctx.lineWidth = 1;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "top";
+
+      // Kicker with side ornaments
+      ctx.font = `700 ${kickerSize}px ${display}`;
+      const kicker = "Locked Supply";
+      const kickerW = ctx.measureText(kicker).width;
+      ctx.fillStyle = "rgba(204, 255, 0, 0.7)";
+      const tickY = y + kickerSize / 2;
+      ctx.fillRect(cx - kickerW / 2 - 36, tickY - 1, 18, 2);
+      ctx.fillRect(cx + kickerW / 2 + 18, tickY - 1, 18, 2);
+      ctx.beginPath();
+      ctx.arc(cx - kickerW / 2 - 42, tickY, 2.5, 0, Math.PI * 2);
+      ctx.arc(cx + kickerW / 2 + 42, tickY, 2.5, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = accent;
+      ctx.fillText(kicker, cx, y);
+      y += kickerSize + gapAfterKicker;
+
+      const isLocked = daysLeft > 0;
+      ctx.font = `700 ${titleSize}px ${display}`;
+      const titleW = ctx.measureText(title).width;
+      const rowW = iconSize + iconGap + titleW;
+      const rowX = Math.round(cx - rowW / 2);
+      const iconY = Math.round(y + (titleSize - iconSize) / 2 - titleSize * 0.04);
+      drawPadlockIcon(ctx, rowX, iconY, iconSize, isLocked, isLocked ? accent : "#a1a1aa");
+
+      ctx.textAlign = "left";
+      ctx.textBaseline = "top";
+      ctx.fillStyle = "#ffffff";
+      ctx.font = `700 ${titleSize}px ${display}`;
+      ctx.fillText(title, Math.round(rowX + iconSize + iconGap), y);
+      ctx.textAlign = "center";
+      y += titleSize + gapAfterTitle;
+
+      ctx.fillStyle = accent;
+      ctx.font = `700 ${amountSize}px ${display}`;
+      ctx.fillText(amountWithDays, cx, y);
+
+      // Soft rule under amount
+      const ruleY = y + amountSize + 28;
+      ctx.strokeStyle = "rgba(204, 255, 0, 0.28)";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(cx - 120, ruleY);
+      ctx.lineTo(cx + 120, ruleY);
+      ctx.stroke();
+      ctx.fillStyle = accent;
+      ctx.beginPath();
+      ctx.arc(cx, ruleY, 2.5, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Bottom center: mode + site (white)
       ctx.textBaseline = "alphabetic";
-      ctx.font = `500 24px ${family}`;
-      ctx.fillStyle = "#b4b4bc";
-      ctx.textAlign = "right";
-      ctx.fillText("lootingpad.com  |  Robinhood Chain", width - 72, 1032);
+      ctx.fillStyle = "#ffffff";
+      ctx.font = `600 ${metaSize}px ${sans}`;
+      ctx.fillText(meta, cx, height - 78);
+      ctx.font = `500 ${siteSize}px ${sans}`;
+      ctx.fillText("lootingpad.com  |  Robinhood Chain", cx, height - 44);
     };
 
-    mark.onload = paint;
-    scene.onload = paint;
-    mark.onerror = paint;
-    scene.onerror = paint;
-    paint();
+    mark.onload = () => {
+      void paint();
+    };
+    mark.onerror = () => {
+      void paint();
+    };
+    void paint();
 
     return () => {
       cancel = true;
     };
-  }, [amountLabel, lock.symbol, modeLabel, progress, status]);
+  }, [amountLabel, daysLeft, lock.symbol, modeLabel, supplyPctLabel, unlockLine, unlockedPct]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -329,7 +433,7 @@ function LockShareCard({ lock, onClose }: { lock: Lock; onClose: () => void }) {
     const payload = {
       files: [file],
       title: "LOOTING Dev Lock",
-      text: `Dev Lock $${lock.symbol}: ${amountLabel} · ${modeLabel}`,
+      text: `Dev Lock $${lock.symbol}: ${amountLabel} · ${modeLabel} · ${unlockLine}`,
     };
     if (navigator.canShare?.(payload)) {
       try {
@@ -386,6 +490,66 @@ function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: numbe
   ctx.closePath();
 }
 
+/** Lock badge: padlock inside a circle. Open shackle when unlocked. */
+function drawPadlockIcon(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  size: number,
+  locked: boolean,
+  color: string,
+) {
+  const cx = x + size / 2;
+  const cy = y + size / 2;
+  const ringW = Math.max(2.5, size * 0.07);
+  const lockSize = size * 0.48;
+  const lockX = cx - lockSize / 2;
+  const lockY = cy - lockSize / 2;
+
+  ctx.save();
+
+  // Outer circle
+  ctx.strokeStyle = color;
+  ctx.lineWidth = ringW;
+  ctx.beginPath();
+  ctx.arc(cx, cy, size / 2 - ringW / 2, 0, Math.PI * 2);
+  ctx.stroke();
+
+  // Padlock (smaller, inside the ring)
+  const bodyW = lockSize * 0.7;
+  const bodyH = lockSize * 0.52;
+  const bodyX = lockX + (lockSize - bodyW) / 2;
+  const bodyY = lockY + lockSize * 0.4;
+  const lx = lockX + lockSize / 2;
+  const outerR = lockSize * 0.26;
+  const innerR = lockSize * 0.14;
+
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  if (locked) {
+    ctx.arc(lx, bodyY, outerR, Math.PI, 0, false);
+    ctx.arc(lx, bodyY, innerR, 0, Math.PI, true);
+  } else {
+    const ox = lx + lockSize * 0.16;
+    ctx.arc(ox, bodyY - lockSize * 0.02, outerR, Math.PI * 0.95, Math.PI * 1.9, false);
+    ctx.arc(ox, bodyY - lockSize * 0.02, innerR, Math.PI * 1.9, Math.PI * 0.95, true);
+  }
+  ctx.closePath();
+  ctx.fill();
+
+  roundRect(ctx, bodyX, bodyY, bodyW, bodyH, lockSize * 0.1);
+  ctx.fill();
+
+  ctx.fillStyle = "#050505";
+  ctx.beginPath();
+  ctx.arc(lx, bodyY + bodyH * 0.36, lockSize * 0.07, 0, Math.PI * 2);
+  ctx.fill();
+  roundRect(ctx, lx - lockSize * 0.035, bodyY + bodyH * 0.36, lockSize * 0.07, bodyH * 0.38, lockSize * 0.02);
+  ctx.fill();
+
+  ctx.restore();
+}
+
 export function DevLock() {
   const { connected, address, connect } = useWallet();
   const [mode, setMode] = useState<Mode>("time");
@@ -400,6 +564,7 @@ export function DevLock() {
   const [locks, setLocks] = useState(seedLocks);
   const [notice, setNotice] = useState("");
   const [shareLock, setShareLock] = useState<Lock | null>(null);
+  const [lockPage, setLockPage] = useState(1);
   const [tokenOpen, setTokenOpen] = useState(false);
   const [tokenUp, setTokenUp] = useState(false);
   const tokenRef = useRef<HTMLDivElement>(null);
@@ -428,6 +593,13 @@ export function DevLock() {
   const lockedNow = locks.reduce((sum, lock) => sum + (lock.amount - vestedAmount(lock)), 0);
   const released = locks.reduce((sum, lock) => sum + vestedAmount(lock), 0);
   const waiting = locks.reduce((sum, lock) => sum + claimableAmount(lock), 0);
+  const lockPages = Math.max(1, Math.ceil(locks.length / LOCKS_PER_PAGE));
+  const safeLockPage = Math.min(lockPage, lockPages);
+  const pagedLocks = locks.slice((safeLockPage - 1) * LOCKS_PER_PAGE, safeLockPage * LOCKS_PER_PAGE);
+
+  useEffect(() => {
+    if (lockPage > lockPages) setLockPage(lockPages);
+  }, [lockPage, lockPages]);
 
   useEffect(() => {
     if (!tokenOpen) return;
@@ -497,6 +669,7 @@ export function DevLock() {
     setLocks((current) => [next, ...current]);
     setBalances((current) => ({ ...current, [coin.symbol]: (current[coin.symbol] ?? 0) - value }));
     setAmount("");
+    setLockPage(1);
     setNotice(
       mode === "time"
         ? `Locked ${formatTokens(value)} ${coin.symbol} until ${formatDate(unlockAt)}.`
@@ -704,6 +877,10 @@ export function DevLock() {
                       : "—"}
                 </dd>
               </div>
+              <div>
+                <dt>Fee Lock</dt>
+                <dd>{DEV_LOCK_FEE_ETH} ETH</dd>
+              </div>
             </dl>
 
             {notice ? <p className="devlock-notice">{notice}</p> : null}
@@ -711,7 +888,9 @@ export function DevLock() {
             <button type="button" className="devlock-submit" onClick={submit}>
               {mode === "time" ? "Lock until date" : "Start vesting"}
             </button>
-            <p className="devlock-fine">A lock cannot be cancelled early. Tokens return to this wallet only as they unlock.</p>
+            <p className="devlock-fine">
+              A lock cannot be cancelled early. Creating a lock costs a flat {DEV_LOCK_FEE_ETH} ETH Fee Lock. Tokens return to this wallet only as they unlock.
+            </p>
           </section>
 
           <div className="devlock-side">
@@ -740,14 +919,14 @@ export function DevLock() {
               </header>
               {locks.length === 0 ? <p className="devlock-empty-note">No locks yet.</p> : null}
               <ul>
-                {locks.map((lock) => {
+                {pagedLocks.map((lock) => {
                   const vested = vestedAmount(lock);
                   const claimable = claimableAmount(lock);
                   const progress = lock.amount > 0 ? (vested / lock.amount) * 100 : 0;
                   return (
                     <li key={lock.id}>
                       <div className="devlock-row">
-                        <TokenLogo symbol={lock.symbol} size={32} />
+                        <TokenLogo symbol={lock.symbol} size={28} />
                         <div>
                           <b>
                             ${lock.symbol}
@@ -755,25 +934,30 @@ export function DevLock() {
                           </b>
                           <span>{lockStatusLine(lock)}</span>
                         </div>
-                        <strong>{formatTokens(lock.amount - lock.claimed)}</strong>
+                        <div className="devlock-row-end">
+                          <strong>{formatTokens(lock.amount - lock.claimed)}</strong>
+                          <div className="devlock-actions">
+                            {claimable > 1 ? (
+                              <button type="button" className="devlock-claim" onClick={() => claim(lock)}>
+                                Claim {formatTokens(claimable)}
+                              </button>
+                            ) : null}
+                            <button type="button" className="devlock-share" onClick={() => setShareLock(lock)}>
+                              Share
+                            </button>
+                          </div>
+                        </div>
                       </div>
                       <i className="devlock-bar slim" aria-hidden>
                         <span className="release" style={{ width: `${progress}%` }} />
                       </i>
-                      <div className="devlock-actions">
-                        {claimable > 1 ? (
-                          <button type="button" className="devlock-claim" onClick={() => claim(lock)}>
-                            Claim {formatTokens(claimable)}
-                          </button>
-                        ) : null}
-                        <button type="button" className="devlock-share" onClick={() => setShareLock(lock)}>
-                          Share
-                        </button>
-                      </div>
                     </li>
                   );
                 })}
               </ul>
+              {locks.length > LOCKS_PER_PAGE ? (
+                <Pager page={safeLockPage} pages={lockPages} onChange={setLockPage} />
+              ) : null}
             </section>
           </div>
         </div>

@@ -5,6 +5,7 @@ import { DRAFT_KEY } from "@/lib/draft";
 import { PONS_LAUNCH_WINDOW } from "@/lib/launch-window";
 import { formatPrice, formatUsd, marketStats, shortAddress, type Launch } from "@/lib/mock";
 import { GiftIcon, WalletIcon } from "./Icons";
+import { Pager } from "./Pager";
 import { SlidingTabs } from "./SlidingTabs";
 import { Sparkline } from "./Sparkline";
 import { TokenLogo } from "./TokenLogo";
@@ -244,7 +245,7 @@ export function Terminal({
       <section className="sheet token-main">
         <header className="token-head">
           {photo ? (
-            <img src={photo} alt="" className="token-mark object-cover" width={64} height={64} />
+            <img src={photo} alt="" className="token-mark object-cover" width={64} height={64} decoding="async" />
           ) : (
             <TokenLogo symbol={launch.symbol} size={64} />
           )}
@@ -415,26 +416,7 @@ export function Terminal({
             </tbody>
           </table>
         )}
-        {pages > 1 ? (
-          <div className="data-pager">
-            <button type="button" disabled={currentPage === 1} onClick={() => setPage(currentPage - 1)}>
-              Prev
-            </button>
-            {Array.from({ length: pages }, (_, index) => (
-              <button
-                key={index}
-                type="button"
-                className={currentPage === index + 1 ? "on" : ""}
-                onClick={() => setPage(index + 1)}
-              >
-                {index + 1}
-              </button>
-            ))}
-            <button type="button" disabled={currentPage === pages} onClick={() => setPage(currentPage + 1)}>
-              Next
-            </button>
-          </div>
-        ) : null}
+        {pages > 1 ? <Pager page={currentPage} pages={pages} onChange={setPage} /> : null}
       </section>
       </div>
 
@@ -865,9 +847,9 @@ function Position({
         </dl>
       </section>
       <figure className="pnl-card">
-        <img className="pnl-scene" src={scene} alt="" />
+        <img className="pnl-scene" src={scene} alt="" loading="lazy" decoding="async" />
         <span className="pnl-logo-wrap">
-          <img className="pnl-logo" src="/logo-wordmark.png" alt="LOOTING" />
+          <img className="pnl-logo" src="/logo-wordmark.png" alt="LOOTING" loading="lazy" decoding="async" />
         </span>
         <figcaption className="pnl-copy">
           {shown.symbol ? <span className="pnl-symbol">${symbol}</span> : null}
