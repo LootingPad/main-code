@@ -1,16 +1,18 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { getFees, getLaunches, getWalletDevLocks } from "@/lib/api";
 import { DEV_LOCK_FEE_ETH } from "@/lib/fees";
-import { launches } from "@/lib/mock";
+import type { Cadence, DevLock, DevLockMode, Launch } from "@/lib/types";
+import { useAsyncData } from "@/lib/use-async-data";
 import { Pager } from "./Pager";
 import { SlidingTabs } from "./SlidingTabs";
 import { TokenLogo } from "./TokenLogo";
 import { useWallet } from "./Wallet";
 
 const DAY = 24 * 60 * 60 * 1000;
-const NOW = Date.parse("2026-09-26T00:00:00Z");
 const LOCKS_PER_PAGE = 4;
+const DEMO_BALANCE = 10_000_000;
 
 const TIME_PRESETS = [
   { id: "30", label: "30 days", days: 30 },
@@ -38,69 +40,8 @@ const CADENCES = [
   { id: "month", label: "Monthly", unit: "month", days: 30 },
 ] as const;
 
-type Mode = "time" | "vest";
-type Cadence = (typeof CADENCES)[number]["id"];
-
-type Lock = {
-  id: string;
-  address: string;
-  symbol: string;
-  name: string;
-  mode: Mode;
-  amount: number;
-  claimed: number;
-  start: number;
-  cliff: number;
-  unlock: number;
-  cadence: Cadence;
-};
-
-const startBalances: Record<string, number> = {
-  VAULT: 8_200_000,
-  THREAD: 4_600_000,
-};
-
-const seedLocks: Lock[] = [
-  {
-    id: "vault-time",
-    address: "0x7a31c8e14b0d9f6a2c55e81d4b90aa1100c0ff21",
-    symbol: "VAULT",
-    name: "Night Vault",
-    mode: "time",
-    amount: 2_500_000,
-    claimed: 0,
-    start: NOW - 12 * DAY,
-    cliff: NOW - 12 * DAY,
-    unlock: NOW + 78 * DAY,
-    cadence: "day",
-  },
-  {
-    id: "thread-vest",
-    address: "0x12ab90ff33c1d8e774aa0199bb221100de44a901",
-    symbol: "THREAD",
-    name: "Gold Thread",
-    mode: "vest",
-    amount: 6_000_000,
-    claimed: 0,
-    start: NOW - 60 * DAY,
-    cliff: NOW - 30 * DAY,
-    unlock: NOW + 335 * DAY,
-    cadence: "month",
-  },
-  {
-    id: "vault-ready",
-    address: "0x7a31c8e14b0d9f6a2c55e81d4b90aa1100c0ff21",
-    symbol: "VAULT",
-    name: "Night Vault",
-    mode: "time",
-    amount: 500_000,
-    claimed: 0,
-    start: NOW - 34 * DAY,
-    cliff: NOW - 34 * DAY,
-    unlock: NOW - 4 * DAY,
-    cadence: "day",
-  },
-];
+type Mode = DevLockMode;
+type Lock = DevLock;
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
@@ -141,7 +82,7 @@ function daysBetween(from: number, to: number) {
   return Math.max(0, Math.round((to - from) / DAY));
 }
 
-function vestedAmount(lock: Lock, now = NOW) {
+function vestedAmount(lock: Lock, now = Date.now()) {
   if (now >= lock.unlock) return lock.amount;
   if (lock.mode === "time" || now <= lock.cliff) return 0;
   const span = lock.unlock - lock.cliff;
@@ -158,11 +99,12 @@ function lockModeLabel(mode: Mode) {
 }
 
 function lockStatusLine(lock: Lock) {
-  const vested = vestedAmount(lock);
+  const now = Date.now();
+  const vested = vestedAmount(lock, now);
   const left = lock.amount - vested;
   if (lock.mode === "time") {
     return left > 0
-      ? `Unlocks ${formatDate(lock.unlock)} · ${daysBetween(NOW, lock.unlock)} days`
+      ? `Unlocks ${formatDate(lock.unlock)} · ${daysBetween(now, lock.unlock)} days`
       : `Unlocked ${formatDate(lock.unlock)}`;
   }
   if (vested <= 1) {
@@ -173,14 +115,23 @@ function lockStatusLine(lock: Lock) {
   return `${formatTokens(vested)} unlocked · ends ${formatDate(lock.unlock)}`;
 }
 
-function LockShareCard({ lock, onClose }: { lock: Lock; onClose: () => void }) {
+function LockShareCard({
+  lock,
+  onClose,
+  launches,
+}: {
+  lock: Lock;
+  onClose: () => void;
+  launches: Launch[];
+}) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [note, setNote] = useState("");
-  const vested = vestedAmount(lock);
+  const now = Date.now();
+  const vested = vestedAmount(lock, now);
   const progress = lock.amount > 0 ? vested / lock.amount : 0;
   const unlockedPct = Math.round(progress * 100);
   const modeLabel = lockModeLabel(lock.mode);
-  const daysLeft = daysBetween(NOW, lock.unlock);
+  const daysLeft = daysBetween(now, lock.unlock);
   const unlockLine =
     daysLeft > 0
       ? `Unlocks ${formatDate(lock.unlock)} · ${daysLeft} days`
@@ -234,11 +185,9 @@ function LockShareCard({ lock, onClose }: { lock: Lock; onClose: () => void }) {
       ctx.imageSmoothingEnabled = true;
       ctx.imageSmoothingQuality = "high";
 
-      // Flat black stage
       ctx.fillStyle = "#050505";
       ctx.fillRect(0, 0, width, height);
 
-      // Soft lime wash — wide falloff, no hard edge band
       const glow = ctx.createRadialGradient(width / 2, height + 120, 80, width / 2, height + 80, 1100);
       glow.addColorStop(0, "rgba(204, 255, 0, 0.22)");
       glow.addColorStop(0.22, "rgba(204, 255, 0, 0.1)");
@@ -255,45 +204,38 @@ function LockShareCard({ lock, onClose }: { lock: Lock; onClose: () => void }) {
       ctx.fillStyle = haze;
       ctx.fillRect(0, height * 0.55, width, height * 0.45);
 
-      // Theme ornaments — lime corner brackets + soft frame
       const accent = "#ccff00";
       const corner = 56;
       const arm = 36;
       ctx.strokeStyle = "rgba(204, 255, 0, 0.45)";
       ctx.lineWidth = 2;
       ctx.lineCap = "square";
-      // top-left
       ctx.beginPath();
       ctx.moveTo(corner, corner + arm);
       ctx.lineTo(corner, corner);
       ctx.lineTo(corner + arm, corner);
       ctx.stroke();
-      // top-right
       ctx.beginPath();
       ctx.moveTo(width - corner - arm, corner);
       ctx.lineTo(width - corner, corner);
       ctx.lineTo(width - corner, corner + arm);
       ctx.stroke();
-      // bottom-left
       ctx.beginPath();
       ctx.moveTo(corner, height - corner - arm);
       ctx.lineTo(corner, height - corner);
       ctx.lineTo(corner + arm, height - corner);
       ctx.stroke();
-      // bottom-right
       ctx.beginPath();
       ctx.moveTo(width - corner - arm, height - corner);
       ctx.lineTo(width - corner, height - corner);
       ctx.lineTo(width - corner, height - corner - arm);
       ctx.stroke();
 
-      // Logo — top center
       const logoH = 58;
       const logoW = mark.naturalWidth > 0 ? (mark.naturalWidth / mark.naturalHeight) * logoH : 0;
       const cx = Math.round(width / 2);
       if (logoW > 0) ctx.drawImage(mark, Math.round(cx - logoW / 2), 64, logoW, logoH);
 
-      // Hairline under logo
       if (logoW > 0) {
         ctx.strokeStyle = "rgba(204, 255, 0, 0.35)";
         ctx.lineWidth = 1;
@@ -344,7 +286,6 @@ function LockShareCard({ lock, onClose }: { lock: Lock; onClose: () => void }) {
       ctx.textAlign = "center";
       ctx.textBaseline = "top";
 
-      // Kicker with side ornaments
       ctx.font = `700 ${kickerSize}px ${display}`;
       const kicker = "Locked Supply";
       const kickerW = ctx.measureText(kicker).width;
@@ -381,7 +322,6 @@ function LockShareCard({ lock, onClose }: { lock: Lock; onClose: () => void }) {
       ctx.font = `700 ${amountSize}px ${display}`;
       ctx.fillText(amountWithDays, cx, y);
 
-      // Soft rule under amount
       const ruleY = y + amountSize + 28;
       ctx.strokeStyle = "rgba(204, 255, 0, 0.28)";
       ctx.lineWidth = 1;
@@ -394,7 +334,6 @@ function LockShareCard({ lock, onClose }: { lock: Lock; onClose: () => void }) {
       ctx.arc(cx, ruleY, 2.5, 0, Math.PI * 2);
       ctx.fill();
 
-      // Bottom center: mode + site (white)
       ctx.textBaseline = "alphabetic";
       ctx.fillStyle = "#ffffff";
       ctx.font = `600 ${metaSize}px ${sans}`;
@@ -490,7 +429,6 @@ function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: numbe
   ctx.closePath();
 }
 
-/** Lock badge: padlock inside a circle. Open shackle when unlocked. */
 function drawPadlockIcon(
   ctx: CanvasRenderingContext2D,
   x: number,
@@ -508,14 +446,12 @@ function drawPadlockIcon(
 
   ctx.save();
 
-  // Outer circle
   ctx.strokeStyle = color;
   ctx.lineWidth = ringW;
   ctx.beginPath();
   ctx.arc(cx, cy, size / 2 - ringW / 2, 0, Math.PI * 2);
   ctx.stroke();
 
-  // Padlock (smaller, inside the ring)
   const bodyW = lockSize * 0.7;
   const bodyH = lockSize * 0.52;
   const bodyX = lockX + (lockSize - bodyW) / 2;
@@ -552,16 +488,29 @@ function drawPadlockIcon(
 
 export function DevLock() {
   const { connected, address, connect } = useWallet();
+  const { data: launches } = useAsyncData(() => getLaunches({ limit: 100 }), [], { initial: [] });
+  const { data: apiLocks } = useAsyncData(
+    () => getWalletDevLocks(address),
+    [address],
+    { initial: [], enabled: connected },
+  );
+  const { data: fees } = useAsyncData(() => getFees(), [], {
+    initial: null as Awaited<ReturnType<typeof getFees>> | null,
+  });
+  const lockFee = fees?.DEV_LOCK_FEE_ETH ?? DEV_LOCK_FEE_ETH;
+
   const [mode, setMode] = useState<Mode>("time");
-  const [symbol, setSymbol] = useState("VAULT");
+  const [symbol, setSymbol] = useState("");
   const [amount, setAmount] = useState("1000000");
   const [preset, setPreset] = useState<(typeof TIME_PRESETS)[number]["id"]>("90");
-  const [customDate, setCustomDate] = useState(isoDate(NOW + 90 * DAY));
+  const [customDate, setCustomDate] = useState(() => isoDate(Date.now() + 90 * DAY));
   const [cliff, setCliff] = useState<(typeof CLIFFS)[number]["id"]>("30");
   const [length, setLength] = useState<(typeof LENGTHS)[number]["id"]>("365");
   const [cadence, setCadence] = useState<Cadence>("month");
-  const [balances, setBalances] = useState(startBalances);
-  const [locks, setLocks] = useState(seedLocks);
+  const [balances, setBalances] = useState<Record<string, number>>({});
+  const [localLocks, setLocalLocks] = useState<Lock[]>([]);
+  const [lockEdits, setLockEdits] = useState<Record<string, Lock>>({});
+  const [hiddenLockIds, setHiddenLockIds] = useState<string[]>([]);
   const [notice, setNotice] = useState("");
   const [shareLock, setShareLock] = useState<Lock | null>(null);
   const [lockPage, setLockPage] = useState(1);
@@ -571,23 +520,40 @@ export function DevLock() {
 
   const coins = useMemo(
     () => launches.filter((launch) => launch.creator.toLowerCase() === address.toLowerCase() && !launch.draft),
-    [address],
+    [address, launches],
   );
+
+  useEffect(() => {
+    if (!symbol && coins[0]) setSymbol(coins[0].symbol);
+  }, [symbol, coins]);
+
+  const locks = useMemo(() => {
+    if (!connected) return localLocks;
+    const hidden = new Set(hiddenLockIds);
+    const apiMerged = apiLocks
+      .filter((item) => !hidden.has(item.id))
+      .map((item) => lockEdits[item.id] ?? item);
+    const apiIds = new Set(apiMerged.map((item) => item.id));
+    const locals = localLocks.filter((item) => !apiIds.has(item.id) && !hidden.has(item.id));
+    return [...locals, ...apiMerged];
+  }, [connected, apiLocks, localLocks, lockEdits, hiddenLockIds]);
+
   const coin = coins.find((item) => item.symbol === symbol) ?? coins[0];
-  const balance = coin ? (balances[coin.symbol] ?? 0) : 0;
+  const balance = coin ? (balances[coin.symbol] ?? DEMO_BALANCE) : 0;
   const parsed = Number(amount.replace(/,/g, ""));
   const value = Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
 
+  const now = Date.now();
   const cliffDays = CLIFFS.find((item) => item.id === cliff)?.days ?? 0;
   const lengthDays = LENGTHS.find((item) => item.id === length)?.days ?? 365;
   const cadenceDays = CADENCES.find((item) => item.id === cadence)?.days ?? 30;
   const presetDays = TIME_PRESETS.find((item) => item.id === preset)?.days ?? 90;
   const customMs = parseDate(customDate);
-  const unlockAt = mode === "time" ? (preset === "custom" ? customMs : NOW + presetDays * DAY) : NOW + (cliffDays + lengthDays) * DAY;
-  const cliffAt = mode === "vest" ? NOW + cliffDays * DAY : NOW;
+  const unlockAt = mode === "time" ? (preset === "custom" ? customMs : now + presetDays * DAY) : now + (cliffDays + lengthDays) * DAY;
+  const cliffAt = mode === "vest" ? now + cliffDays * DAY : now;
   const periods = Math.max(1, Math.round(lengthDays / cadenceDays));
   const perSlice = value > 0 ? value / periods : 0;
-  const dateOk = Number.isFinite(unlockAt) && unlockAt > NOW;
+  const dateOk = Number.isFinite(unlockAt) && unlockAt > now;
   const ready = Boolean(coin) && value > 0 && value <= balance && dateOk;
 
   const lockedNow = locks.reduce((sum, lock) => sum + (lock.amount - vestedAmount(lock)), 0);
@@ -654,42 +620,51 @@ export function DevLock() {
       return;
     }
     const next: Lock = {
-      id: `${coin.symbol}-${locks.length + 1}`,
+      id: `local-${coin.symbol}-${Date.now()}`,
       address: coin.address,
       symbol: coin.symbol,
       name: coin.name,
       mode,
       amount: value,
       claimed: 0,
-      start: NOW,
+      start: now,
       cliff: cliffAt,
       unlock: unlockAt,
       cadence,
     };
-    setLocks((current) => [next, ...current]);
-    setBalances((current) => ({ ...current, [coin.symbol]: (current[coin.symbol] ?? 0) - value }));
+    setLocalLocks((current) => [next, ...current]);
+    setBalances((current) => ({ ...current, [coin.symbol]: (current[coin.symbol] ?? DEMO_BALANCE) - value }));
     setAmount("");
     setLockPage(1);
     setNotice(
       mode === "time"
-        ? `Locked ${formatTokens(value)} ${coin.symbol} until ${formatDate(unlockAt)}.`
-        : `Vesting ${formatTokens(value)} ${coin.symbol} through ${formatDate(unlockAt)}.`,
+        ? `Demo only — on-chain lock not wired. Preview: locked ${formatTokens(value)} ${coin.symbol} until ${formatDate(unlockAt)}.`
+        : `Demo only — on-chain lock not wired. Preview: vesting ${formatTokens(value)} ${coin.symbol} through ${formatDate(unlockAt)}.`,
     );
   };
 
   const claim = (lock: Lock) => {
     const payout = claimableAmount(lock);
     if (payout <= 0) return;
-    setBalances((current) => ({ ...current, [lock.symbol]: (current[lock.symbol] ?? 0) + payout }));
-    setLocks((current) =>
-      current.flatMap((item) => {
-        if (item.id !== lock.id) return [item];
-        const claimed = item.claimed + payout;
-        if (claimed >= item.amount - 1) return [];
-        return [{ ...item, claimed }];
-      }),
-    );
-    setNotice(`Claimed ${formatTokens(payout)} ${lock.symbol} back to the wallet.`);
+    setBalances((current) => ({ ...current, [lock.symbol]: (current[lock.symbol] ?? DEMO_BALANCE) + payout }));
+    const claimed = lock.claimed + payout;
+    const next = claimed >= lock.amount - 1 ? null : { ...lock, claimed };
+    if (lock.id.startsWith("local-")) {
+      setLocalLocks((current) => {
+        if (!next) return current.filter((item) => item.id !== lock.id);
+        return current.map((item) => (item.id === lock.id ? next : item));
+      });
+    } else if (!next) {
+      setHiddenLockIds((current) => [...current, lock.id]);
+      setLockEdits((current) => {
+        const copy = { ...current };
+        delete copy[lock.id];
+        return copy;
+      });
+    } else {
+      setLockEdits((current) => ({ ...current, [lock.id]: next }));
+    }
+    setNotice(`Demo only — on-chain claim not wired. Preview: claimed ${formatTokens(payout)} ${lock.symbol}.`);
   };
 
   const schedule = scheduleParts(mode, cliffDays, lengthDays);
@@ -752,7 +727,7 @@ export function DevLock() {
                         <b>${item.symbol}</b>
                         <em>{item.name}</em>
                       </span>
-                      <strong>{formatTokens(balances[item.symbol] ?? 0)}</strong>
+                      <strong>{formatTokens(balances[item.symbol] ?? DEMO_BALANCE)}</strong>
                     </button>
                   ))}
                 </div>
@@ -804,7 +779,7 @@ export function DevLock() {
                     className="devlock-date"
                     type="date"
                     value={customDate}
-                    min={isoDate(NOW + DAY)}
+                    min={isoDate(now + DAY)}
                     aria-label="Unlock date"
                     onChange={(event) => setCustomDate(event.target.value)}
                   />
@@ -879,7 +854,7 @@ export function DevLock() {
               </div>
               <div>
                 <dt>Fee Lock</dt>
-                <dd>{DEV_LOCK_FEE_ETH} ETH</dd>
+                <dd>{lockFee} ETH</dd>
               </div>
             </dl>
 
@@ -889,7 +864,7 @@ export function DevLock() {
               {mode === "time" ? "Lock until date" : "Start vesting"}
             </button>
             <p className="devlock-fine">
-              A lock cannot be cancelled early. Creating a lock costs a flat {DEV_LOCK_FEE_ETH} ETH Fee Lock. Tokens return to this wallet only as they unlock.
+              A lock cannot be cancelled early. Creating a lock costs a flat {lockFee} ETH Fee Lock. Tokens return to this wallet only as they unlock.
             </p>
           </section>
 
@@ -907,7 +882,12 @@ export function DevLock() {
               </article>
               <article className="sheet">
                 <span>Wallet</span>
-                <strong>{formatTokens(Object.values(balances).reduce((sum, item) => sum + item, 0))}</strong>
+                <strong>
+                  {formatTokens(
+                    coins.reduce((sum, item) => sum + (balances[item.symbol] ?? DEMO_BALANCE), 0) ||
+                      Object.values(balances).reduce((sum, item) => sum + item, 0),
+                  )}
+                </strong>
                 <em>Unlocked balance</em>
               </article>
             </section>
@@ -975,7 +955,7 @@ export function DevLock() {
           </button>
         </section>
       )}
-      {shareLock ? <LockShareCard lock={shareLock} onClose={() => setShareLock(null)} /> : null}
+      {shareLock ? <LockShareCard lock={shareLock} onClose={() => setShareLock(null)} launches={launches} /> : null}
     </div>
   );
 }

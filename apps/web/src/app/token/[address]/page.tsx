@@ -1,5 +1,6 @@
 import { Terminal } from "@/components/Terminal";
-import { findLaunch, type Launch } from "@/lib/mock";
+import { draftLaunch, getLaunch } from "@/lib/api";
+import type { LaunchWithStats } from "@/lib/types";
 
 type PageProps = {
   params: Promise<{ address: string }>;
@@ -25,27 +26,26 @@ type PageProps = {
 export default async function TokenPage({ params, searchParams }: PageProps) {
   const { address } = await params;
   const query = await searchParams;
-  const existing = findLaunch(address);
 
-  const launch: Launch = existing ?? {
-    address: address === "preview" ? "0xpreview0000000000000000000000000000aa" : address,
-    name: query.name || "Untitled",
-    symbol: (query.symbol || "NEW").toUpperCase(),
-    description: query.description || "Draft coin. Not launched yet.",
-    creator: "0x4c91aa7700de12bb3318e774c0ff21aa",
-    marketCap: 0,
-    progress: 0,
-    change1h: 0,
-    priceUsd: 0.000001,
-    luckyShare: Number(query.lucky || 20),
-    creatorTax: Number(query.fee || 1),
-    phase: "curve",
-    draft: true,
-  };
+  let launch: LaunchWithStats | ReturnType<typeof draftLaunch>;
+  try {
+    launch = await getLaunch(address);
+  } catch {
+    launch = draftLaunch({
+      address: address === "preview" ? "0xpreview0000000000000000000000000000aa" : address,
+      name: query.name,
+      symbol: query.symbol,
+      description: query.description,
+      creator: query.wallet || "0x0000000000000000000000000000000000000000",
+      luckyShare: Number(query.lucky || 20),
+      creatorTax: Number(query.fee || 1),
+    });
+  }
 
   return (
     <Terminal
       launch={launch}
+      initialStats={"stats" in launch ? launch.stats : undefined}
       meta={{
         website: query.website,
         twitter: query.twitter,

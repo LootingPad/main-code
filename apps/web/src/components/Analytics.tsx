@@ -1,76 +1,13 @@
 "use client";
 
-import { useMemo, useState } from "react";
-import { accruedFeeUsd, DEV_LOCK_FEE_ETH } from "@/lib/fees";
-import { formatCount, formatUsd, launches, leaderboard, marketStats, stagedLaunches } from "@/lib/mock";
-import { eventAprRange, publicStakingEvents, STAKING_LOCK_OPTIONS } from "@/lib/staking-events";
-
-const ETH_USD = 3500;
-const DAYS = 72;
+import { useState } from "react";
+import { getAnalytics, getFees } from "@/lib/api";
+import { DEV_LOCK_FEE_ETH } from "@/lib/fees";
+import { formatCount, formatUsd } from "@/lib/format";
+import type { AnalyticsPayload } from "@/lib/types";
+import { useAsyncData } from "@/lib/use-async-data";
 
 type Range = "24h" | "all";
-
-const rows = [...launches, ...stagedLaunches].map((launch) => {
-  const stats = marketStats(launch);
-  const feeUsd = accruedFeeUsd(launch);
-  const boxUsd = feeUsd * (launch.luckyShare / 100);
-  return { launch, stats, feeUsd, boxUsd, creatorUsd: feeUsd - boxUsd };
-});
-
-const volume24h = rows.reduce((sum, row) => sum + row.stats.volume24h, 0);
-const feeUsd = rows.reduce((sum, row) => sum + row.feeUsd, 0);
-const boxUsd = rows.reduce((sum, row) => sum + row.boxUsd, 0);
-const creatorUsd = feeUsd - boxUsd;
-const traders = rows.reduce((sum, row) => sum + row.stats.traders, 0);
-const graduated = rows.filter((row) => row.launch.phase === "graduated").length;
-const creators = new Set(rows.map((row) => row.launch.creator)).size;
-const txns = rows.reduce((sum, row) => sum + row.stats.txns, 0);
-const seasonXp = leaderboard.reduce((sum, row) => sum + row.xp, 0);
-const seasonTrades = leaderboard.reduce((sum, row) => sum + row.trades, 0);
-const boxShare = feeUsd > 0 ? (boxUsd / feeUsd) * 100 : 0;
-const creatorLines = [...rows].sort((a, b) => b.creatorUsd - a.creatorUsd).slice(0, 5);
-const boxLines = [...rows].sort((a, b) => b.boxUsd - a.boxUsd).slice(0, 5);
-const curveLines = [...rows].sort((a, b) => b.launch.progress - a.launch.progress).slice(0, 5);
-
-const vaultEvents = publicStakingEvents;
-const vaultStaked = vaultEvents.reduce((sum, event) => sum + event.staked, 0);
-const vaultRewards = vaultEvents.reduce((sum, event) => sum + event.reward, 0);
-const vaultStakers = vaultEvents.reduce((sum, event) => sum + event.stakers, 0);
-const topVaults = [...vaultEvents].sort((a, b) => b.staked - a.staked).slice(0, 5);
-
-const STAKE_BY_LOCK = STAKING_LOCK_OPTIONS.map((lock) => {
-  const enabled = vaultEvents.filter((event) => event.locks.includes(lock.id));
-  const staked = enabled.reduce((sum, event) => sum + event.staked / event.locks.length, 0);
-  return {
-    id: lock.id,
-    label: lock.label,
-    rate: lock.rate,
-    staked: Math.round(staked),
-    day: Math.round(staked * 0.018),
-  };
-});
-
-/** Season mock aggregate for Dev Lock (protocol totals). */
-const DEV_LOCK = {
-  locks: 186,
-  locksDay: 7,
-  timeLocks: 112,
-  vestLocks: 74,
-  tokensLocked: 48_600_000,
-  tokensLockedDay: 1_240_000,
-  claimed: 6_820_000,
-  claimedDay: 186_000,
-  feeEth: 186 * DEV_LOCK_FEE_ETH,
-  feeEthDay: 7 * DEV_LOCK_FEE_ETH,
-  creators: 42,
-  top: [
-    { symbol: "VAULT", amount: 12_400_000, mode: "Time-based" },
-    { symbol: "THREAD", amount: 9_100_000, mode: "Vesting" },
-    { symbol: "HARBOR", amount: 7_600_000, mode: "Time-based" },
-    { symbol: "KEY", amount: 5_800_000, mode: "Vesting" },
-    { symbol: "LANTERN", amount: 4_200_000, mode: "Time-based" },
-  ],
-};
 
 function formatTokens(value: number) {
   if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(2)}M`;
@@ -78,76 +15,34 @@ function formatTokens(value: number) {
   return Math.round(value).toLocaleString("en-US");
 }
 
-function formatEth(usdOrEth: number, asEth = false) {
-  const eth = asEth ? usdOrEth : usdOrEth / ETH_USD;
+function formatEth(usdOrEth: number, ethUsd: number, asEth = false) {
+  const eth = asEth ? usdOrEth : usdOrEth / Math.max(1, ethUsd);
   if (eth >= 100) return `${eth.toFixed(1)} ETH`;
   if (eth >= 1) return `${eth.toFixed(2)} ETH`;
   if (eth >= 0.001) return `${eth.toFixed(4)} ETH`;
   return `${eth.toFixed(6)} ETH`;
 }
 
-function dayLabel(offset: number) {
-  const date = new Date();
-  date.setUTCDate(date.getUTCDate() - (DAYS - 1 - offset));
+function formatDay(iso: string) {
+  const date = new Date(`${iso}T00:00:00.000Z`);
   return date.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
 }
 
-function series(total: number, shape: "volume" | "launches" | "staking" | "devlock") {
-  const weights = Array.from({ length: DAYS }, (_, index) => {
-    const t = index / (DAYS - 1);
-    const seed = shape === "volume" ? 3 : shape === "launches" ? 11 : shape === "staking" ? 5 : 13;
-    const noise = 0.72 + ((index * 17 + seed) % 9) / 18;
-    const volumeWave = 0.08 + Math.exp(-((t - 0.82) ** 2) / 0.012) * 1.15 + Math.exp(-((t - 0.22) ** 2) / 0.02) * 0.22;
-    const launchWave =
-      0.05 +
-      Math.exp(-((t - 0.18) ** 2) / 0.01) * 0.55 +
-      Math.exp(-((t - 0.78) ** 2) / 0.008) * 1.05 +
-      (t > 0.9 ? 0.35 : 0);
-    const stakingWave = 0.16 + t * 0.62 + Math.exp(-((t - 0.48) ** 2) / 0.018) * 0.55 + Math.exp(-((t - 0.86) ** 2) / 0.01) * 0.4;
-    const lockWave = 0.12 + t * 0.55 + Math.exp(-((t - 0.36) ** 2) / 0.015) * 0.5 + Math.exp(-((t - 0.74) ** 2) / 0.012) * 0.45;
-    const wave =
-      shape === "volume" ? volumeWave : shape === "launches" ? launchWave : shape === "staking" ? stakingWave : lockWave;
-    return Math.max(0.04, wave * noise);
-  });
-  const weightSum = weights.reduce((sum, value) => sum + value, 0);
-  return weights.map((weight) => (total * weight) / weightSum);
+function lockModeLabel(mode: string) {
+  if (mode === "vest" || mode === "Vesting") return "Vesting";
+  if (mode === "time" || mode === "Time-based") return "Time-based";
+  return mode;
 }
 
 export function Analytics() {
   const [range, setRange] = useState<Range>("24h");
-  const allTime = range === "all";
-  const volume = allTime ? volume24h * 18 : volume24h;
-  const launchCount = allTime ? rows.length * 24 : rows.length;
-  const traderCount = allTime ? traders * 6 : traders;
-  const volumeDelta = allTime ? 12.4 : -1.3;
-  const launchDelta = allTime ? 4.1 : 8.7;
-
-  const stakeRows = STAKE_BY_LOCK.map((lock) => ({ ...lock, amount: allTime ? lock.staked : lock.day }));
-  const stakedTotal = allTime ? vaultStaked : Math.round(vaultStaked * 0.018);
-  const rewardsTotal = allTime ? vaultRewards : Math.round(vaultRewards * 0.04);
-  const stakerCount = allTime ? vaultStakers : Math.max(12, Math.round(vaultStakers * 0.05));
-  const vaultCount = allTime ? vaultEvents.length : Math.min(vaultEvents.length, 3);
-  const avgRate =
-    stakeRows.reduce((sum, row) => sum + row.amount, 0) > 0
-      ? stakeRows.reduce((sum, row) => sum + row.amount * row.rate, 0) / stakeRows.reduce((sum, row) => sum + row.amount, 0)
-      : 0;
-
-  const lockCount = allTime ? DEV_LOCK.locks : DEV_LOCK.locksDay;
-  const lockedTokens = allTime ? DEV_LOCK.tokensLocked : DEV_LOCK.tokensLockedDay;
-  const claimedTokens = allTime ? DEV_LOCK.claimed : DEV_LOCK.claimedDay;
-  const feeLockEth = allTime ? DEV_LOCK.feeEth : DEV_LOCK.feeEthDay;
-  const timeShare = (DEV_LOCK.timeLocks / DEV_LOCK.locks) * 100;
-  const vestShare = 100 - timeShare;
-
-  const volumeBars = useMemo(() => series(volume, "volume"), [volume]);
-  const launchBars = useMemo(() => series(launchCount, "launches"), [launchCount]);
-  const stakeBars = useMemo(() => series(stakedTotal, "staking"), [stakedTotal]);
-  const lockBars = useMemo(() => series(lockedTokens, "devlock"), [lockedTokens]);
-  const volumePeak = Math.max(...volumeBars);
-  const launchPeak = Math.max(...launchBars);
-  const stakePeak = Math.max(...stakeBars);
-  const lockPeak = Math.max(...lockBars);
-  const ticks = [0, Math.floor(DAYS / 2), DAYS - 1];
+  const { data, error, loading } = useAsyncData(() => getAnalytics(range), [range], {
+    initial: null,
+  });
+  const { data: feesConfig } = useAsyncData(() => getFees(), [], {
+    initial: null,
+  });
+  const feeLockRate = feesConfig?.DEV_LOCK_FEE_ETH ?? DEV_LOCK_FEE_ETH;
 
   return (
     <div className="analytics-page">
@@ -166,6 +61,82 @@ export function Analytics() {
         </div>
       </div>
 
+      {loading && !data ? (
+        <section className="sheet analytics-card">
+          <p className="analytics-note">Loading analytics…</p>
+        </section>
+      ) : null}
+
+      {error && !data ? (
+        <section className="sheet analytics-card">
+          <p className="analytics-note">{error}</p>
+        </section>
+      ) : null}
+
+      {data ? <AnalyticsBody data={data} range={range} feeLockRate={feeLockRate} /> : null}
+    </div>
+  );
+}
+
+function AnalyticsBody({
+  data,
+  range,
+  feeLockRate,
+}: {
+  data: AnalyticsPayload;
+  range: Range;
+  feeLockRate: number;
+}) {
+  const allTime = range === "all";
+  const ethUsd = data.ethUsd > 0 ? data.ethUsd : 3500;
+  const { summary, fees, season, staking, devLock, series } = data;
+
+  const volume = summary.volume;
+  const launchCount = summary.launches;
+  const traderCount = summary.traders;
+  const volumeDelta = summary.volumeDeltaPct;
+  const launchDelta = summary.launchDeltaPct;
+  const boxShare = fees.boxSharePct;
+  const onCurve = Math.max(0, allTime ? summary.launches - season.graduated : summary.launches);
+
+  const stakeRows = staking.byLock.map((lock) => ({
+    ...lock,
+    amount: allTime ? lock.staked : lock.day,
+  }));
+  const stakeAmountTotal = stakeRows.reduce((sum, row) => sum + row.amount, 0);
+  const stakedTotal = allTime ? staking.staked : stakeAmountTotal || Math.round(staking.staked * 0.018);
+  const rewardsTotal = staking.rewards;
+  const stakerCount = staking.stakers;
+  const vaultCount = staking.vaultCount;
+  const avgRate =
+    stakeAmountTotal > 0
+      ? stakeRows.reduce((sum, row) => sum + row.amount * row.rate, 0) / stakeAmountTotal
+      : 0;
+
+  const lockCount = allTime ? devLock.locks : devLock.locksDay;
+  const lockedTokens = allTime ? devLock.tokensLocked : devLock.tokensLockedDay;
+  const claimedTokens = allTime ? devLock.claimed : devLock.claimedDay;
+  const feeLockEth = allTime ? devLock.feeEth : devLock.feeEthDay;
+  const timeShare = devLock.locks > 0 ? (devLock.timeLocks / devLock.locks) * 100 : 0;
+  const vestShare = 100 - timeShare;
+  const timeLocksShown = allTime ? devLock.timeLocks : Math.round(devLock.timeLocks * (devLock.locks > 0 ? devLock.locksDay / devLock.locks : 0));
+  const vestLocksShown = allTime ? devLock.vestLocks : Math.round(devLock.vestLocks * (devLock.locks > 0 ? devLock.locksDay / devLock.locks : 0));
+  const creatorsShown = allTime ? devLock.creators : Math.min(devLock.creators, Math.max(0, lockCount));
+
+  const volumeBars = series.volume;
+  const launchBars = series.launches;
+  const stakeBars = series.staking;
+  const lockBars = series.devlock;
+  const days = series.days;
+  const dayCount = Math.max(1, days.length);
+  const volumePeak = Math.max(1, ...volumeBars);
+  const launchPeak = Math.max(1, ...launchBars);
+  const stakePeak = Math.max(1, ...stakeBars);
+  const lockPeak = Math.max(1, ...lockBars);
+  const ticks = [0, Math.floor((dayCount - 1) / 2), dayCount - 1].filter((v, i, arr) => arr.indexOf(v) === i);
+
+  return (
+    <>
       <section className="sheet analytics-card">
         <div className="analytics-stats">
           <article>
@@ -180,13 +151,14 @@ export function Analytics() {
             <span>{allTime ? "Launches" : "24h launches"}</span>
             <strong>{formatCount(launchCount)}</strong>
             <em className={launchDelta >= 0 ? "up" : "down"}>
-              +{launchDelta.toFixed(1)}% from prior {allTime ? "window" : "day"}
+              {launchDelta >= 0 ? "+" : ""}
+              {launchDelta.toFixed(1)}% from prior {allTime ? "window" : "day"}
             </em>
           </article>
           <article>
             <span>{allTime ? "Traders" : "Active traders"}</span>
             <strong>{formatCount(traderCount)}</strong>
-            <em>{allTime ? `${formatCount(txns)} trades` : `${creators} token creators`}</em>
+            <em>{allTime ? `${formatCount(summary.txns)} trades` : `${season.creators} token creators`}</em>
           </article>
         </div>
         <p className="analytics-note">Totals are summed from live launches. The 24h view uses the latest completed day.</p>
@@ -195,7 +167,7 @@ export function Analytics() {
       <section className="sheet analytics-card">
         <header className="analytics-card-head">
           <h2>Creator fees</h2>
-          <span>{formatEth(feeUsd)} accrued</span>
+          <span>{formatEth(fees.feeUsd, ethUsd)} accrued</span>
         </header>
         <div className="analytics-bar" aria-hidden>
           <i className="creator" style={{ width: `${100 - boxShare}%` }} />
@@ -204,12 +176,12 @@ export function Analytics() {
         <div className="analytics-stats">
           <article>
             <span>Creator share</span>
-            <strong>{formatUsd(creatorUsd)}</strong>
-            <em>{formatEth(creatorUsd)} claimable</em>
+            <strong>{formatUsd(fees.creatorUsd)}</strong>
+            <em>{formatEth(fees.creatorUsd, ethUsd)} claimable</em>
             <ul>
-              {creatorLines.map((row) => (
-                <li key={row.launch.address}>
-                  <span>${row.launch.symbol}</span>
+              {fees.topCreators.map((row) => (
+                <li key={row.address}>
+                  <span>${row.symbol}</span>
                   <b>{formatUsd(row.creatorUsd)}</b>
                 </li>
               ))}
@@ -217,12 +189,12 @@ export function Analytics() {
           </article>
           <article>
             <span>Lucky Boxes</span>
-            <strong>{formatUsd(boxUsd)}</strong>
-            <em>{formatEth(boxUsd)} funded</em>
+            <strong>{formatUsd(fees.boxUsd)}</strong>
+            <em>{formatEth(fees.boxUsd, ethUsd)} funded</em>
             <ul>
-              {boxLines.map((row) => (
-                <li key={row.launch.address}>
-                  <span>${row.launch.symbol}</span>
+              {fees.topBoxes.map((row) => (
+                <li key={row.address}>
+                  <span>${row.symbol}</span>
                   <b>{formatUsd(row.boxUsd)}</b>
                 </li>
               ))}
@@ -230,13 +202,13 @@ export function Analytics() {
           </article>
           <article>
             <span>Curve</span>
-            <strong>{rows.length - graduated}</strong>
-            <em>{graduated} graduated</em>
+            <strong>{onCurve}</strong>
+            <em>{season.graduated} graduated</em>
             <ul>
-              {curveLines.map((row) => (
-                <li key={row.launch.address}>
-                  <span>${row.launch.symbol}</span>
-                  <b>{row.launch.progress}%</b>
+              {fees.topCurves.map((row) => (
+                <li key={row.address}>
+                  <span>${row.symbol}</span>
+                  <b>{row.progress}%</b>
                 </li>
               ))}
             </ul>
@@ -245,19 +217,19 @@ export function Analytics() {
         <dl className="analytics-side">
           <div>
             <dt>Season XP</dt>
-            <dd>{formatCount(seasonXp)}</dd>
+            <dd>{formatCount(season.xp)}</dd>
           </div>
           <div>
             <dt>Qualifying trades</dt>
-            <dd>{formatCount(seasonTrades)}</dd>
+            <dd>{formatCount(season.trades)}</dd>
           </div>
           <div>
             <dt>Trades</dt>
-            <dd>{formatCount(allTime ? txns * 6 : txns)}</dd>
+            <dd>{formatCount(summary.txns)}</dd>
           </div>
           <div>
             <dt>Creators</dt>
-            <dd>{creators}</dd>
+            <dd>{season.creators}</dd>
           </div>
         </dl>
       </section>
@@ -274,7 +246,7 @@ export function Analytics() {
             <i
               key={row.id}
               className={row.id === "flex" ? "flex" : row.id === "30" ? "lock30" : "lock90"}
-              style={{ width: `${stakedTotal > 0 ? (row.amount / stakeRows.reduce((s, r) => s + r.amount, 0)) * 100 : 0}%` }}
+              style={{ width: `${stakeAmountTotal > 0 ? (row.amount / stakeAmountTotal) * 100 : 0}%` }}
             />
           ))}
         </div>
@@ -291,11 +263,11 @@ export function Analytics() {
           <article>
             <span>Top vaults</span>
             <ul>
-              {topVaults.map((event) => (
+              {staking.topVaults.map((event) => (
                 <li key={event.id}>
                   <span>${event.symbol}</span>
                   <b>
-                    {formatTokens(event.staked)} · {eventAprRange(event)}
+                    {formatTokens(event.staked)} · {event.apr ?? "—"}
                   </b>
                 </li>
               ))}
@@ -306,7 +278,7 @@ export function Analytics() {
             <strong>{formatTokens(rewardsTotal)}</strong>
             <em>Funded across Create Staking events</em>
             <ul>
-              {[...vaultEvents]
+              {[...staking.topVaults]
                 .sort((a, b) => b.reward - a.reward)
                 .slice(0, 5)
                 .map((event) => (
@@ -342,7 +314,7 @@ export function Analytics() {
         <header className="analytics-card-head">
           <h2>Dev Lock</h2>
           <span>
-            {formatTokens(lockedTokens)} locked · {formatEth(feeLockEth, true)} fees
+            {formatTokens(lockedTokens)} locked · {formatEth(feeLockEth, ethUsd, true)} fees
           </span>
         </header>
         <div className="analytics-bar" aria-hidden>
@@ -352,29 +324,29 @@ export function Analytics() {
         <div className="analytics-stats">
           <article>
             <span>Time-based</span>
-            <strong>{formatCount(allTime ? DEV_LOCK.timeLocks : Math.round(DEV_LOCK.timeLocks * 0.04))}</strong>
+            <strong>{formatCount(timeLocksShown)}</strong>
             <em>{timeShare.toFixed(0)}% of locks</em>
           </article>
           <article>
             <span>Vesting</span>
-            <strong>{formatCount(allTime ? DEV_LOCK.vestLocks : Math.round(DEV_LOCK.vestLocks * 0.04))}</strong>
+            <strong>{formatCount(vestLocksShown)}</strong>
             <em>{vestShare.toFixed(0)}% of locks</em>
           </article>
           <article>
             <span>Fee Lock</span>
-            <strong>{formatEth(feeLockEth, true)}</strong>
-            <em>{DEV_LOCK_FEE_ETH} ETH flat per create</em>
+            <strong>{formatEth(feeLockEth, ethUsd, true)}</strong>
+            <em>{feeLockRate} ETH flat per create</em>
           </article>
         </div>
         <div className="analytics-stats analytics-vault-top">
           <article>
             <span>Top locked tokens</span>
             <ul>
-              {DEV_LOCK.top.map((row) => (
-                <li key={row.symbol}>
+              {devLock.top.map((row) => (
+                <li key={row.id ?? row.symbol}>
                   <span>${row.symbol}</span>
                   <b>
-                    {formatTokens(row.amount)} · {row.mode}
+                    {formatTokens(row.amount)} · {lockModeLabel(row.mode)}
                   </b>
                 </li>
               ))}
@@ -391,11 +363,11 @@ export function Analytics() {
               </li>
               <li>
                 <span>Creators locking</span>
-                <b>{formatCount(allTime ? DEV_LOCK.creators : 4)}</b>
+                <b>{formatCount(creatorsShown)}</b>
               </li>
               <li>
                 <span>Fee rate</span>
-                <b>{DEV_LOCK_FEE_ETH} ETH</b>
+                <b>{feeLockRate} ETH</b>
               </li>
             </ul>
           </article>
@@ -415,7 +387,7 @@ export function Analytics() {
           </div>
           <div>
             <dt>Fee Lock</dt>
-            <dd>{formatEth(feeLockEth, true)}</dd>
+            <dd>{formatEth(feeLockEth, ethUsd, true)}</dd>
           </div>
         </dl>
       </section>
@@ -426,6 +398,7 @@ export function Analytics() {
           note="Daily volume across the season."
           value={formatUsd(volume)}
           bars={volumeBars}
+          days={days}
           peak={volumePeak}
           ticks={ticks}
           format={formatUsd}
@@ -435,6 +408,7 @@ export function Analytics() {
           note="Daily launches across the season."
           value={formatCount(launchCount)}
           bars={launchBars}
+          days={days}
           peak={launchPeak}
           ticks={ticks}
           format={(amount) => (amount >= 10 ? formatCount(Math.round(amount)) : amount.toFixed(1))}
@@ -444,6 +418,7 @@ export function Analytics() {
           note="Daily token staked across public vaults."
           value={formatTokens(stakedTotal)}
           bars={stakeBars}
+          days={days}
           peak={stakePeak}
           ticks={ticks}
           format={formatTokens}
@@ -453,12 +428,13 @@ export function Analytics() {
           note="Daily creator tokens locked via Dev Lock."
           value={formatTokens(lockedTokens)}
           bars={lockBars}
+          days={days}
           peak={lockPeak}
           ticks={ticks}
           format={formatTokens}
         />
       </div>
-    </div>
+    </>
   );
 }
 
@@ -467,6 +443,7 @@ function ChartCard({
   note,
   value,
   bars,
+  days,
   peak,
   ticks,
   format,
@@ -475,6 +452,7 @@ function ChartCard({
   note: string;
   value: string;
   bars: number[];
+  days: string[];
   peak: number;
   ticks: number[];
   format: (amount: number) => string;
@@ -488,24 +466,24 @@ function ChartCard({
         </div>
         <strong>{value}</strong>
       </header>
-      <div className="analytics-bars" role="img" aria-label={`${title} over the last ${DAYS} days`}>
+      <div className="analytics-bars" role="img" aria-label={`${title} over the last ${days.length} days`}>
         {bars.map((valueBar, index) => (
           <button
-            key={index}
+            key={days[index] ?? index}
             type="button"
             style={{ height: `${Math.max(6, (valueBar / peak) * 100)}%` }}
-            aria-label={`${dayLabel(index)} ${format(valueBar)}`}
+            aria-label={`${days[index] ? formatDay(days[index]) : `Day ${index + 1}`} ${format(valueBar)}`}
           >
             <span className="analytics-tip">
               <b>{format(valueBar)}</b>
-              <em>{dayLabel(index)}</em>
+              <em>{days[index] ? formatDay(days[index]) : `Day ${index + 1}`}</em>
             </span>
           </button>
         ))}
       </div>
       <div className="analytics-axis">
         {ticks.map((index) => (
-          <span key={index}>{dayLabel(index)}</span>
+          <span key={index}>{days[index] ? formatDay(days[index]) : ""}</span>
         ))}
       </div>
     </section>

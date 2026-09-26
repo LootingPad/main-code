@@ -17,6 +17,7 @@ export function Sparkline({
   fill = false,
   fluid = false,
   up: upProp,
+  values,
 }: {
   seed: string;
   width?: number;
@@ -24,15 +25,26 @@ export function Sparkline({
   fill?: boolean;
   fluid?: boolean;
   up?: boolean;
+  /** Real price series. When provided (even flat), never invent a seeded chart. */
+  values?: number[] | null;
 }) {
-  const data = priceSeries(seed, fill ? 48 : 24);
-  const min = Math.min(...data);
-  const max = Math.max(...data);
-  const up = upProp ?? data[data.length - 1] >= data[0];
+  const real = (values ?? []).filter((n) => Number.isFinite(n) && n > 0);
+  const data =
+    values != null
+      ? real.length >= 2
+        ? real
+        : real.length === 1
+          ? [real[0], real[0]]
+          : [1, 1]
+      : priceSeries(seed, fill ? 48 : 24);
+  const series = data.length >= 2 ? data : [1, 1];
+  const min = Math.min(...series);
+  const max = Math.max(...series);
+  const up = upProp ?? series[series.length - 1] >= series[0];
   const color = up ? "#ccff00" : "#ff4d4d";
   const gradId = `spark-${seed.replace(/[^a-z0-9]/gi, "")}-${up ? "up" : "down"}`;
-  const coords = data.map((point, index) => {
-    const x = (index / (data.length - 1)) * width;
+  const coords = series.map((point, index) => {
+    const x = (index / (series.length - 1)) * width;
     const y = height - ((point - min) / (max - min || 1)) * (height - 8) - 4;
     return [x, y] as const;
   });

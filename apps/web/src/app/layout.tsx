@@ -1,10 +1,11 @@
 import type { Metadata, Viewport } from "next";
+import { headers } from "next/headers";
 import { Plus_Jakarta_Sans, Sora } from "next/font/google";
 import { Shell } from "@/components/Shell";
 import { WalletProvider } from "@/components/Wallet";
+import { AppKitProvider } from "@/context/AppKitProvider";
 import "./globals.css";
 
-// Body/UI font — preload so text paints with the intended face sooner.
 const jakarta = Plus_Jakarta_Sans({
   subsets: ["latin"],
   variable: "--font-jakarta",
@@ -13,7 +14,6 @@ const jakarta = Plus_Jakarta_Sans({
   preload: true,
 });
 
-// Display/headings — still swap-loaded; skip preload so it does not contend with the body font.
 const sora = Sora({
   subsets: ["latin"],
   variable: "--font-sora",
@@ -34,13 +34,17 @@ export const viewport: Viewport = {
   themeColor: "#171717",
 };
 
-export default function RootLayout({ children }: { children: React.ReactNode }) {
+export default async function RootLayout({ children }: { children: React.ReactNode }) {
+  const cookies = (await headers()).get("cookie");
+
   return (
     <html lang="en" className={`${sora.variable} ${jakarta.variable}`} suppressHydrationWarning>
       <body className="antialiased">
-        <WalletProvider>
-          <Shell>{children}</Shell>
-        </WalletProvider>
+        <AppKitProvider cookies={cookies}>
+          <WalletProvider>
+            <Shell>{children}</Shell>
+          </WalletProvider>
+        </AppKitProvider>
       </body>
     </html>
   );

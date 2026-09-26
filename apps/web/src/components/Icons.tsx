@@ -186,6 +186,20 @@ export function PanelIcon({ open, size = 18 }: IconProps & { open: boolean }) {
   );
 }
 
+export function LootingTokenIcon({ size }: IconProps) {
+  return (
+    <Frame size={size}>
+      <circle cx="12" cy="12" r="7.2" stroke="currentColor" strokeWidth="1.7" />
+      <path
+        d="M12 7.6c1.4 1.6 2.4 3.1 2.4 4.6a2.4 2.4 0 0 1-4.8 0c0-1.5 1-3 2.4-4.6Z"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinejoin="round"
+      />
+    </Frame>
+  );
+}
+
 const icons = {
   Explore: ExploreIcon,
   Launch: LaunchIcon,
@@ -197,6 +211,7 @@ const icons = {
   "Dev Lock": DevLockIcon,
   "Create Staking": CreateStakingIcon,
   Account: AccountIcon,
+  $LOOTING: LootingTokenIcon,
 };
 
 export function NavIcon({ name, size = 20 }: { name: string; size?: number }) {

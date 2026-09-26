@@ -1,19 +1,18 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { getFees, getLaunches, getStakingEvents } from "@/lib/api";
 import { CREATE_STAKING_FEE_ETH } from "@/lib/fees";
-import { launches, marketStats } from "@/lib/mock";
 import {
   DAY,
   eventAprRange,
   formatStakingDate,
   formatStakingTokens,
-  publicStakingEvents,
   STAKING_LOCK_OPTIONS,
-  STAKING_NOW,
   type StakingEvent,
   type StakingLockId,
 } from "@/lib/staking-events";
+import { useAsyncData } from "@/lib/use-async-data";
 import { TokenLogo } from "./TokenLogo";
 import { useWallet } from "./Wallet";
 
@@ -26,21 +25,42 @@ const DURATIONS = [
 
 export function CreateStaking() {
   const { connected, address, connect } = useWallet();
-  const [symbol, setSymbol] = useState(launches[0]?.symbol ?? "VAULT");
+  const { data: launches } = useAsyncData(() => getLaunches({ limit: 100 }), [], { initial: [] });
+  const { data: apiEvents } = useAsyncData(() => getStakingEvents({ limit: 100 }), [], { initial: [] });
+  const { data: fees } = useAsyncData(() => getFees(), [], {
+    initial: null as Awaited<ReturnType<typeof getFees>> | null,
+  });
+  const createFee = fees?.CREATE_STAKING_FEE_ETH ?? CREATE_STAKING_FEE_ETH;
+
+  const tokens = useMemo(() => launches.filter((item) => !item.draft), [launches]);
+  const [symbol, setSymbol] = useState("");
   const [reward, setReward] = useState("1000000");
   const [duration, setDuration] = useState<(typeof DURATIONS)[number]["id"]>("90");
   const [locks, setLocks] = useState<StakingLockId[]>(["flex", "30", "90"]);
-  const [pools, setPools] = useState<StakingEvent[]>(() => publicStakingEvents.slice(0, 2));
+  const [localPools, setLocalPools] = useState<StakingEvent[]>([]);
   const [notice, setNotice] = useState("");
   const [tokenOpen, setTokenOpen] = useState(false);
   const [tokenUp, setTokenUp] = useState(false);
   const tokenRef = useRef<HTMLDivElement>(null);
 
-  const coin = launches.find((item) => item.symbol === symbol) ?? launches[0];
+  useEffect(() => {
+    if (!symbol && tokens[0]) setSymbol(tokens[0].symbol);
+  }, [symbol, tokens]);
+
+  const coin = tokens.find((item) => item.symbol === symbol) ?? tokens[0];
+  const apiPools = useMemo(
+    () =>
+      apiEvents
+        .filter((item) => item.creator.toLowerCase() === address.toLowerCase())
+        .slice(0, 20),
+    [apiEvents, address],
+  );
+  const pools = useMemo(() => [...localPools, ...apiPools], [localPools, apiPools]);
+
   const parsed = Number(reward.replace(/,/g, ""));
   const value = Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
   const durationDays = DURATIONS.find((item) => item.id === duration)?.days ?? 90;
-  const endsAt = STAKING_NOW + durationDays * DAY;
+  const endsAt = Date.now() + durationDays * DAY;
   const ready = Boolean(coin) && value > 0 && locks.length > 0;
 
   useEffect(() => {
@@ -94,7 +114,7 @@ export function CreateStaking() {
       return;
     }
     const next: StakingEvent = {
-      id: `${coin.symbol}-${pools.length + 1}`,
+      id: `local-${coin.symbol}-${Date.now()}`,
       address: coin.address,
       symbol: coin.symbol,
       name: coin.name,
@@ -103,14 +123,16 @@ export function CreateStaking() {
       staked: 0,
       stakers: 0,
       marketCap: coin.marketCap,
-      volume24h: marketStats(coin).volume24h,
+      volume24h: coin.stats?.volume24h ?? 0,
       durationDays,
       locks: [...locks],
       ends: endsAt,
     };
-    setPools((current) => [next, ...current]);
+    setLocalPools((current) => [next, ...current]);
     setReward("");
-    setNotice(`Created ${formatStakingTokens(value)} ${coin.symbol} staking event through ${formatStakingDate(endsAt)}.`);
+    setNotice(
+      `Demo only — on-chain create not wired. Preview: ${formatStakingTokens(value)} ${coin.symbol} through ${formatStakingDate(endsAt)}.`,
+    );
   };
 
   return (
@@ -145,28 +167,26 @@ export function CreateStaking() {
               </button>
               {tokenOpen ? (
                 <div className="devlock-token-menu" role="listbox" aria-label="Coin to stake">
-                  {launches
-                    .filter((item) => !item.draft)
-                    .map((item) => (
-                      <button
-                        key={item.address}
-                        type="button"
-                        role="option"
-                        aria-selected={item.symbol === coin.symbol}
-                        className={item.symbol === coin.symbol ? "on" : ""}
-                        onClick={() => {
-                          setSymbol(item.symbol);
-                          setTokenOpen(false);
-                          setNotice("");
-                        }}
-                      >
-                        <TokenLogo symbol={item.symbol} size={28} />
-                        <span>
-                          <b>${item.symbol}</b>
-                          <em>{item.name}</em>
-                        </span>
-                      </button>
-                    ))}
+                  {tokens.map((item) => (
+                    <button
+                      key={item.address}
+                      type="button"
+                      role="option"
+                      aria-selected={item.symbol === coin.symbol}
+                      className={item.symbol === coin.symbol ? "on" : ""}
+                      onClick={() => {
+                        setSymbol(item.symbol);
+                        setTokenOpen(false);
+                        setNotice("");
+                      }}
+                    >
+                      <TokenLogo symbol={item.symbol} size={28} />
+                      <span>
+                        <b>${item.symbol}</b>
+                        <em>{item.name}</em>
+                      </span>
+                    </button>
+                  ))}
                 </div>
               ) : null}
             </div>
@@ -232,7 +252,7 @@ export function CreateStaking() {
               </div>
               <div>
                 <dt>Create fee</dt>
-                <dd>{CREATE_STAKING_FEE_ETH} ETH</dd>
+                <dd>{createFee} ETH</dd>
               </div>
             </dl>
 
@@ -242,7 +262,7 @@ export function CreateStaking() {
               Create staking event
             </button>
             <p className="devlock-fine">
-              Creating a vault costs a flat {CREATE_STAKING_FEE_ETH} ETH create fee. Published events show on the public Staking page so anyone can stake into your pool.
+              Creating a vault costs a flat {createFee} ETH create fee. Published events show on the public Staking page so anyone can stake into your pool.
             </p>
           </section>
 
@@ -325,6 +345,11 @@ export function CreateStaking() {
             </section>
           </div>
         </div>
+      ) : connected ? (
+        <section className="sheet devlock-gate">
+          <h2>No launched coins</h2>
+          <p>No LOOTING launches are available yet. Launch a coin first, then create a staking event.</p>
+        </section>
       ) : (
         <section className="sheet devlock-gate">
           <h2>Connect to create</h2>

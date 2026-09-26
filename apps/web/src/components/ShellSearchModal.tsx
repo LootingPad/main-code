@@ -2,8 +2,11 @@
 
 import Link from "next/link";
 import { FormEvent, RefObject, useEffect, useRef } from "react";
-import { formatUsd, launches, marketStats } from "@/lib/mock";
-import { eventAprRange, formatStakingDate, formatStakingTokens, publicStakingEvents } from "@/lib/staking-events";
+import { getLaunches, getStakingEvents } from "@/lib/api";
+import { formatUsd } from "@/lib/format";
+import { eventAprRange, formatStakingDate, formatStakingTokens } from "@/lib/staking-events";
+import type { LaunchWithStats, StakingEvent } from "@/lib/types";
+import { useAsyncData } from "@/lib/use-async-data";
 import { SearchIcon } from "./Icons";
 import { TokenLogo } from "./TokenLogo";
 
@@ -40,6 +43,8 @@ export function ShellSearchModal({
   setPage,
   menuOpen,
   setMenuOpen,
+  launches: launchesProp,
+  stakingEvents: stakingEventsProp,
 }: {
   query: string;
   setQuery: (value: string) => void;
@@ -59,7 +64,22 @@ export function ShellSearchModal({
   setPage: (value: number | ((current: number) => number)) => void;
   menuOpen: SearchMenu;
   setMenuOpen: (value: SearchMenu) => void;
+  launches?: LaunchWithStats[];
+  stakingEvents?: StakingEvent[];
 }) {
+  const fetchLaunches = launchesProp === undefined;
+  const fetchStaking = stakingEventsProp === undefined;
+  const { data: fetchedLaunches } = useAsyncData(() => getLaunches({ limit: 50 }), [], {
+    initial: [] as LaunchWithStats[],
+    enabled: fetchLaunches,
+  });
+  const { data: fetchedStaking } = useAsyncData(() => getStakingEvents({ limit: 50 }), [], {
+    initial: [] as StakingEvent[],
+    enabled: fetchStaking,
+  });
+  const launches = launchesProp ?? fetchedLaunches;
+  const stakingEvents = stakingEventsProp ?? fetchedStaking;
+
   useEffect(() => {
     function onKey(event: KeyboardEvent) {
       if (event.key !== "Escape") return;
@@ -78,7 +98,7 @@ export function ShellSearchModal({
     category === "staking"
       ? []
       : launches
-          .map((coin) => ({ kind: "token" as const, coin, stats: marketStats(coin) }))
+          .map((coin) => ({ kind: "token" as const, coin, stats: coin.stats }))
           .filter(({ coin, stats }) => {
             const hours = ageHours(stats.age);
             if (age === "24h" && hours > 24) return false;
@@ -101,7 +121,7 @@ export function ShellSearchModal({
   const stakingHits =
     category === "token"
       ? []
-      : publicStakingEvents
+      : stakingEvents
           .filter((event) => {
             if (!needle) return true;
             return (

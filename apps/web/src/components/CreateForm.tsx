@@ -5,7 +5,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useWallet } from "@/components/Wallet";
 import { DRAFT_KEY, type CoinDraft } from "@/lib/draft";
 import { PONS_LAUNCH_WINDOW } from "@/lib/launch-window";
-import { formatCount, shortAddress } from "@/lib/mock";
+import { formatCount, shortAddress } from "@/lib/format";
 import { TokenLogo } from "./TokenLogo";
 
 const stockPairs = ["NVDA", "AAPL", "TSLA", "SPY", "AMZN", "META", "GOOGL", "MSFT", "COIN"] as const;

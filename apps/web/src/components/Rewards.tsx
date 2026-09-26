@@ -6,7 +6,12 @@ import { Pager } from "@/components/Pager";
 import { TokenLogo } from "@/components/TokenLogo";
 import { SlidingTabs } from "@/components/SlidingTabs";
 import { useWallet } from "@/components/Wallet";
-import { boxesForWallet, rewardPool, shortAddress, type BoxStatus, type LuckyBox } from "@/lib/mock";
+import { getRewardTable, getWalletLuckyBoxes, openLuckyBox } from "@/lib/api";
+import { shortAddress } from "@/lib/format";
+import type { BoxStatus, LuckyBox } from "@/lib/types";
+import { useAsyncData } from "@/lib/use-async-data";
+
+const FALLBACK_POOL = ["No reward"];
 
 const statusLabel: Record<BoxStatus, string> = {
   unopened: "Unclaimed",
@@ -42,8 +47,9 @@ function canClaim(box: LuckyBox) {
   return box.status === "unopened" || box.status === "opened";
 }
 
-function prizeFor(box: LuckyBox) {
-  return box.reward ?? rewardPool[Number(box.id) % rewardPool.length];
+function prizeFor(box: LuckyBox, pool: string[]) {
+  const labels = pool.length > 0 ? pool : FALLBACK_POOL;
+  return box.reward ?? labels[Number(box.id) % labels.length] ?? "No reward";
 }
 
 function ShareCard({
@@ -203,16 +209,25 @@ function ShareCard({
   );
 }
 
-function PrizeReveal({ reward, onDone }: { reward: string; onDone: () => void }) {
+function PrizeReveal({
+  reward,
+  rewardPool,
+  onDone,
+}: {
+  reward: string;
+  rewardPool: string[];
+  onDone: () => void;
+}) {
   const trackRef = useRef<HTMLDivElement>(null);
   const doneRef = useRef(onDone);
   doneRef.current = onDone;
 
+  const pool = rewardPool.length > 0 ? rewardPool : FALLBACK_POOL;
   const copies = 12;
-  const strip = useRef(Array.from({ length: copies }, () => rewardPool).flat()).current;
-  const winner = Math.max(0, rewardPool.indexOf(reward));
-  const landIndex = (copies - 2) * rewardPool.length + winner;
-  const startIndex = Math.max(0, landIndex - rewardPool.length * 7);
+  const strip = useRef(Array.from({ length: copies }, () => pool).flat()).current;
+  const winner = Math.max(0, pool.indexOf(reward));
+  const landIndex = (copies - 2) * pool.length + winner;
+  const startIndex = Math.max(0, landIndex - pool.length * 7);
 
   const [shift, setShift] = useState(0);
   const [ready, setReady] = useState(false);
@@ -292,18 +307,35 @@ function PrizeReveal({ reward, onDone }: { reward: string; onDone: () => void })
 
 export function Rewards() {
   const { connected, address, connect } = useWallet();
+  const {
+    data: remoteBoxes,
+    loading: boxesLoading,
+    error: boxesError,
+  } = useAsyncData(() => getWalletLuckyBoxes(address), [address], {
+    initial: [],
+    enabled: connected,
+  });
+  const { data: rewardTable } = useAsyncData(() => getRewardTable(), [], {
+    initial: null,
+  });
+  const rewardPool = rewardTable?.rewardPool?.length ? rewardTable.rewardPool : FALLBACK_POOL;
+
   const [boxes, setBoxes] = useState<LuckyBox[]>([]);
   const [filter, setFilter] = useState<RewardFilter>("all");
   const [page, setPage] = useState(1);
   const [reel, setReel] = useState<{ box: LuckyBox; reward: string; phase: "spin" | "land" } | null>(null);
+  const [opening, setOpening] = useState(false);
   const queueRef = useRef<LuckyBox[]>([]);
   const granted = useRef(new Set<string>());
+  const rewardPoolRef = useRef(rewardPool);
+  rewardPoolRef.current = rewardPool;
 
   useEffect(() => {
-    setBoxes(connected ? boxesForWallet(address) : []);
+    setBoxes(connected ? remoteBoxes : []);
+    granted.current = new Set();
     setFilter("all");
     setPage(1);
-  }, [connected, address]);
+  }, [connected, address, remoteBoxes]);
 
   useEffect(() => {
     setPage(1);
@@ -322,24 +354,41 @@ export function Rewards() {
   const pages = Math.max(1, Math.ceil(visible.length / BOXES_PER_PAGE));
   const safePage = Math.min(page, pages);
   const paged = visible.slice((safePage - 1) * BOXES_PER_PAGE, safePage * BOXES_PER_PAGE);
+  const busy = Boolean(reel) || opening;
 
   function grant(box: LuckyBox, reward: string) {
     if (granted.current.has(box.id)) return;
     granted.current.add(box.id);
     setBoxes((current) =>
-      current.map((item) => (item.id === box.id ? { ...item, status: "claimed", reward, tx: claimHash(box.id), claimedAt: "now" } : item)),
+      current.map((item) =>
+        item.id === box.id
+          ? { ...item, status: "claimed", reward, tx: item.tx ?? claimHash(box.id), claimedAt: item.claimedAt ?? "now" }
+          : item,
+      ),
     );
   }
 
-  function openReel(box: LuckyBox) {
-    setReel({ box, reward: prizeFor(box), phase: "spin" });
+  async function openReel(box: LuckyBox) {
+    let reward = prizeFor(box, rewardPoolRef.current);
+    try {
+      const res = await openLuckyBox(box.id, address);
+      reward = res.reward ?? res.data?.reward ?? reward;
+    } catch {
+      // Local reel fallback when the open endpoint is unreachable.
+    }
+    setReel({ box, reward, phase: "spin" });
   }
 
-  function claimMany(list: LuckyBox[]) {
+  async function claimMany(list: LuckyBox[]) {
     const targets = list.filter((box) => canClaim(box) && !granted.current.has(box.id));
-    if (targets.length === 0 || reel) return;
+    if (targets.length === 0 || busy) return;
     queueRef.current = targets.slice(1);
-    openReel(targets[0]);
+    setOpening(true);
+    try {
+      await openReel(targets[0]);
+    } finally {
+      setOpening(false);
+    }
   }
 
   function finishSpin() {
@@ -358,13 +407,18 @@ export function Rewards() {
     queueRef.current = [];
   }
 
-  function collect() {
+  async function collect() {
     const next = queueRef.current.shift();
     if (!next) {
       setReel(null);
       return;
     }
-    openReel(next);
+    setOpening(true);
+    try {
+      await openReel(next);
+    } finally {
+      setOpening(false);
+    }
   }
 
   useEffect(() => {
@@ -424,57 +478,73 @@ export function Rewards() {
             </tr>
           </thead>
           <tbody>
-            {paged.length === 0 ? (
+            {boxesLoading ? (
+              <tr>
+                <td className="rewards-empty" colSpan={6}>
+                  Loading boxes…
+                </td>
+              </tr>
+            ) : null}
+            {!boxesLoading && boxesError ? (
+              <tr>
+                <td className="rewards-empty" colSpan={6}>
+                  {boxesError}
+                </td>
+              </tr>
+            ) : null}
+            {!boxesLoading && !boxesError && paged.length === 0 ? (
               <tr>
                 <td className="rewards-empty" colSpan={6}>
                   No boxes
                 </td>
               </tr>
             ) : null}
-            {paged.map((box) => {
-              const open = canClaim(box);
-              const active = reel?.box.id === box.id;
-              const prize = box.reward;
-              return (
-                <tr key={box.id} className={active && reel?.phase === "land" ? "is-claiming" : undefined}>
-                  <td className="num text-left">
-                    <span className="box-id">#{box.id}</span>
-                  </td>
-                  <td className="text-left">
-                    <span className="reward-coin">
-                      <TokenLogo symbol={box.token} size={28} />${box.token}
-                    </span>
-                  </td>
-                  <td className="text-left">
-                    <span className={`reward-prize${prize ? (prize === "No reward" ? " is-empty" : " is-won") : " is-hidden"}`}>
-                      {prize ?? (box.status === "ineligible" ? "—" : "Sealed")}
-                    </span>
-                  </td>
-                  <td className="text-left">
-                    {box.status === "claimed" && box.tx ? (
-                      <span className="reward-tx">
-                        {shortAddress(box.tx)}
-                        <span>{box.claimedAt}</span>
-                      </span>
-                    ) : (
-                      <span className="reward-idle">—</span>
-                    )}
-                  </td>
-                  <td className="text-left">
-                    <span className={`status ${box.status === "opened" ? "unopened" : box.status}`}>{statusLabel[box.status]}</span>
-                  </td>
-                  <td className="text-right">
-                    {open ? (
-                      <button type="button" className="claim-btn" disabled={Boolean(reel)} onClick={() => claimMany([box])}>
-                        {active ? "Claiming" : "Claim"}
-                      </button>
-                    ) : (
-                      <span className="reward-idle">{box.status === "holding" ? "Exit to open" : "—"}</span>
-                    )}
-                  </td>
-                </tr>
-              );
-            })}
+            {!boxesLoading && !boxesError
+              ? paged.map((box) => {
+                  const open = canClaim(box);
+                  const active = reel?.box.id === box.id;
+                  const prize = box.reward;
+                  return (
+                    <tr key={box.id} className={active && reel?.phase === "land" ? "is-claiming" : undefined}>
+                      <td className="num text-left">
+                        <span className="box-id">#{box.id}</span>
+                      </td>
+                      <td className="text-left">
+                        <span className="reward-coin">
+                          <TokenLogo symbol={box.token} size={28} />${box.token}
+                        </span>
+                      </td>
+                      <td className="text-left">
+                        <span className={`reward-prize${prize ? (prize === "No reward" ? " is-empty" : " is-won") : " is-hidden"}`}>
+                          {prize ?? (box.status === "ineligible" ? "—" : "Sealed")}
+                        </span>
+                      </td>
+                      <td className="text-left">
+                        {box.status === "claimed" && box.tx ? (
+                          <span className="reward-tx">
+                            {shortAddress(box.tx)}
+                            <span>{box.claimedAt}</span>
+                          </span>
+                        ) : (
+                          <span className="reward-idle">—</span>
+                        )}
+                      </td>
+                      <td className="text-left">
+                        <span className={`status ${box.status === "opened" ? "unopened" : box.status}`}>{statusLabel[box.status]}</span>
+                      </td>
+                      <td className="text-right">
+                        {open ? (
+                          <button type="button" className="claim-btn" disabled={busy} onClick={() => void claimMany([box])}>
+                            {active || (opening && !reel) ? "Claiming" : "Claim"}
+                          </button>
+                        ) : (
+                          <span className="reward-idle">{box.status === "holding" ? "Exit to open" : "—"}</span>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })
+              : null}
           </tbody>
         </table>
         {visible.length > BOXES_PER_PAGE ? (
@@ -483,31 +553,35 @@ export function Rewards() {
       </div>
       <section className="sheet rewards-mobile-board">
         <ul className="app-rows">
-          {paged.length === 0 ? <li className="is-empty">No boxes</li> : null}
-          {paged.map((box) => {
-            const open = canClaim(box);
-            const active = reel?.box.id === box.id;
-            const prize = box.reward;
-            return (
-              <li key={box.id}>
-                <TokenLogo symbol={box.token} size={32} />
-                <div>
-                  <strong>${box.token}</strong>
-                  <span>
-                    #{box.id} · {statusLabel[box.status]}
-                    {prize ? ` · ${prize}` : ""}
-                  </span>
-                </div>
-                {open ? (
-                  <button type="button" className="claim-btn" disabled={Boolean(reel)} onClick={() => claimMany([box])}>
-                    {active ? "Claiming" : "Claim"}
-                  </button>
-                ) : (
-                  <b>{box.status === "holding" ? "Exit" : box.status === "claimed" ? "Done" : "—"}</b>
-                )}
-              </li>
-            );
-          })}
+          {boxesLoading ? <li className="is-empty">Loading boxes…</li> : null}
+          {!boxesLoading && boxesError ? <li className="is-empty">{boxesError}</li> : null}
+          {!boxesLoading && !boxesError && paged.length === 0 ? <li className="is-empty">No boxes</li> : null}
+          {!boxesLoading && !boxesError
+            ? paged.map((box) => {
+                const open = canClaim(box);
+                const active = reel?.box.id === box.id;
+                const prize = box.reward;
+                return (
+                  <li key={box.id}>
+                    <TokenLogo symbol={box.token} size={32} />
+                    <div>
+                      <strong>${box.token}</strong>
+                      <span>
+                        #{box.id} · {statusLabel[box.status]}
+                        {prize ? ` · ${prize}` : ""}
+                      </span>
+                    </div>
+                    {open ? (
+                      <button type="button" className="claim-btn" disabled={busy} onClick={() => void claimMany([box])}>
+                        {active || (opening && !reel) ? "Claiming" : "Claim"}
+                      </button>
+                    ) : (
+                      <b>{box.status === "holding" ? "Exit" : box.status === "claimed" ? "Done" : "—"}</b>
+                    )}
+                  </li>
+                );
+              })
+            : null}
         </ul>
         {visible.length > BOXES_PER_PAGE ? (
           <Pager page={safePage} pages={pages} onChange={setPage} />
@@ -523,7 +597,7 @@ export function Rewards() {
               <>
                 <p className="kicker">Share card</p>
                 <ShareCard token={reel.box.token} boxId={reel.box.id} reward={reel.reward}>
-                  <button type="button" className="claim-btn" onClick={collect}>
+                  <button type="button" className="claim-btn" disabled={opening} onClick={() => void collect()}>
                     {queueRef.current.length > 0 ? "Next box" : "Collect"}
                   </button>
                 </ShareCard>
@@ -533,7 +607,7 @@ export function Rewards() {
                 <p className="kicker">Lucky box</p>
                 <h2 className="claim-title">${reel.box.token}</h2>
                 <p className="page-note">Box #{reel.box.id}</p>
-                <PrizeReveal key={`${reel.box.id}-${reel.reward}`} reward={reel.reward} onDone={finishSpin} />
+                <PrizeReveal key={`${reel.box.id}-${reel.reward}`} reward={reel.reward} rewardPool={rewardPool} onDone={finishSpin} />
               </>
             )}
           </div>

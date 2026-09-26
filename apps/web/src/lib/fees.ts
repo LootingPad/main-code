@@ -1,16 +1,11 @@
-import type { Launch } from "./mock";
+import type { Launch } from "./types";
 
-/** Flat ETH fee charged when creating a Dev Lock (time or vesting). */
-export const DEV_LOCK_FEE_ETH = 0.0005;
-
-/** Flat ETH fee charged when creating a staking vault event. */
-export const CREATE_STAKING_FEE_ETH = 0.0019;
-
-/** Fixed split of accrued creator tax. */
+/** Defaults match backend `FE_FEES` until `/api/fees` is loaded. */
+export const DEV_LOCK_FEE_ETH = 0.003;
+export const CREATE_STAKING_FEE_ETH = 0.003;
 export const CREATOR_FEE_SHARE = 0.8;
 export const PROTOCOL_BURN_SHARE = 0.2;
-
-/** Mock $LOOTING price for burn amount display (USD per token). */
+export const ETH_USD = 3500;
 export const LOOTING_PRICE_USD = 0.0024;
 
 export function feeAccrualWeight(launch: Launch) {
@@ -31,13 +26,13 @@ export function splitLaunchFees(launch: Launch) {
   return splitCreatorFeeUsd(accruedFeeUsd(launch));
 }
 
-export function lootingTokensFromUsd(usd: number) {
-  if (usd <= 0 || LOOTING_PRICE_USD <= 0) return 0;
-  return usd / LOOTING_PRICE_USD;
+export function lootingTokensFromUsd(usd: number, priceUsd = LOOTING_PRICE_USD) {
+  if (usd <= 0 || priceUsd <= 0) return 0;
+  return usd / priceUsd;
 }
 
-export function formatLootingBurn(usd: number) {
-  const tokens = lootingTokensFromUsd(usd);
+export function formatLootingBurn(usd: number, priceUsd = LOOTING_PRICE_USD) {
+  const tokens = lootingTokensFromUsd(usd, priceUsd);
   if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(2)}M LOOTING`;
   if (tokens >= 1_000) return `${(tokens / 1_000).toFixed(1)}k LOOTING`;
   return `${Math.round(tokens).toLocaleString()} LOOTING`;

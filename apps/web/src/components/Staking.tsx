@@ -2,6 +2,8 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
+import { getLaunches, getStakingEvents, getWalletStakingPositions } from "@/lib/api";
+import { formatCount, formatUsd, shortAddress } from "@/lib/format";
 import {
   DAY,
   eventAprRange,
@@ -9,15 +11,12 @@ import {
   formatStakingTokens,
   lockLabel,
   lockRate,
-  publicStakingEvents,
-  seedStakingPositions,
   STAKING_LOCK_OPTIONS,
-  STAKING_NOW,
   type StakingEvent,
   type StakingLockId,
   type StakingPosition,
 } from "@/lib/staking-events";
-import { formatCount, formatUsd, launches, shortAddress } from "@/lib/mock";
+import { useAsyncData } from "@/lib/use-async-data";
 import { Pager } from "./Pager";
 import { SlidingTabs } from "./SlidingTabs";
 import { TokenLogo } from "./TokenLogo";
@@ -29,6 +28,7 @@ const YEAR_SECONDS = 365 * 24 * 60 * 60;
 const EARN_PACE = 360;
 const EVENTS_PER_PAGE = 10;
 const POSITIONS_PER_PAGE = 10;
+const DEMO_PREFIX = "demo-";
 
 function formatLive(value: number) {
   return value.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -38,24 +38,32 @@ function earnPerSecond(stakedAmount: number, rate: number) {
   return ((stakedAmount * (rate / 100)) / YEAR_SECONDS) * EARN_PACE;
 }
 
+function tokenPrice(symbol: string, event: StakingEvent | undefined, launches: { symbol: string; priceUsd: number }[]) {
+  const launch = launches.find((entry) => entry.symbol === symbol);
+  if (launch && launch.priceUsd > 0) return launch.priceUsd;
+  if (event && event.marketCap > 0) return event.marketCap / 1_000_000_000;
+  return 0;
+}
+
 export function Staking() {
-  const { connected, connect } = useWallet();
+  const { connected, connect, address } = useWallet();
   const searchParams = useSearchParams();
   const [tab, setTab] = useState<Tab>("events");
-  const events = publicStakingEvents;
-  const [positions, setPositions] = useState(seedStakingPositions);
+  const { data: events } = useAsyncData(() => getStakingEvents({ limit: 100 }), [], { initial: [] });
+  const { data: apiPositions } = useAsyncData(
+    () => getWalletStakingPositions(address),
+    [address],
+    { initial: [], enabled: connected },
+  );
+  const { data: launches } = useAsyncData(() => getLaunches({ limit: 100 }), [], { initial: [] });
+  const [demoPositions, setDemoPositions] = useState<StakingPosition[]>([]);
+  const [positionEdits, setPositionEdits] = useState<Record<string, StakingPosition>>({});
   const [activeEventId, setActiveEventId] = useState<string | null>(null);
-  const [activePositionId, setActivePositionId] = useState<string | null>(seedStakingPositions[0]?.id ?? null);
+  const [activePositionId, setActivePositionId] = useState<string | null>(null);
   const [side, setSide] = useState<"stake" | "unstake">("stake");
   const [lock, setLock] = useState<StakingLockId>("30");
   const [amount, setAmount] = useState("50000");
-  const [balances, setBalances] = useState<Record<string, number>>({
-    VAULT: 1_200_000,
-    HARBOR: 640_000,
-    THREAD: 480_000,
-    LANTERN: 220_000,
-    KEY: 910_000,
-  });
+  const [balances, setBalances] = useState<Record<string, number>>({});
   const [notice, setNotice] = useState("");
   const [elapsed, setElapsed] = useState(0);
   const [eventPage, setEventPage] = useState(1);
@@ -64,6 +72,16 @@ export function Staking() {
   const anchorRef = useRef(0);
   const perSecRef = useRef(0);
   const openedPoolRef = useRef<string | null>(null);
+
+  const positions = useMemo(() => {
+    if (!connected) return [];
+    const apiMerged = apiPositions
+      .map((item) => positionEdits[item.id] ?? item)
+      .filter((item) => item.amount > 0);
+    const apiIds = new Set(apiMerged.map((item) => item.id));
+    const demos = demoPositions.filter((item) => !apiIds.has(item.id) && item.amount > 0);
+    return [...demos, ...apiMerged];
+  }, [connected, apiPositions, demoPositions, positionEdits]);
 
   const activeEvent = useMemo(() => {
     if (activeEventId) return events.find((item) => item.id === activeEventId) ?? null;
@@ -77,11 +95,11 @@ export function Staking() {
   const activePosition = positions.find((item) => item.id === activePositionId) ?? null;
   const targetEvent =
     activeEvent ?? (activePosition ? (events.find((item) => item.id === activePosition.eventId) ?? null) : null);
-  const symbol = targetEvent?.symbol ?? activePosition?.symbol ?? "VAULT";
+  const symbol = targetEvent?.symbol ?? activePosition?.symbol ?? "TOKEN";
   const availableLocks = targetEvent?.locks ?? STAKING_LOCK_OPTIONS.map((item) => item.id);
   const selectedLock = availableLocks.includes(lock) ? lock : (availableLocks[0] as StakingLockId);
   const rate = lockRate(selectedLock);
-  const walletBalance = balances[symbol] ?? 0;
+  const walletBalance = balances[symbol] ?? 1_000_000;
   const stakedAmount = activePosition?.amount ?? 0;
   const cap = side === "stake" ? walletBalance : stakedAmount;
   const parsed = Number(amount.replace(/,/g, ""));
@@ -91,14 +109,7 @@ export function Staking() {
   const totalStaked = positions.reduce((sum, item) => sum + item.amount, 0);
   const totalStakedUsd = positions.reduce((sum, item) => {
     const event = events.find((entry) => entry.id === item.eventId);
-    const launch = launches.find((entry) => entry.symbol === item.symbol);
-    const price =
-      launch && launch.priceUsd > 0
-        ? launch.priceUsd
-        : event && event.marketCap > 0
-          ? event.marketCap / 1_000_000_000
-          : 0;
-    return sum + item.amount * price;
+    return sum + item.amount * tokenPrice(item.symbol, event, launches);
   }, 0);
   const marketStaked = events.reduce((sum, item) => sum + item.staked, 0);
   const eventPages = Math.max(1, Math.ceil(events.length / EVENTS_PER_PAGE));
@@ -171,6 +182,24 @@ export function Staking() {
     setNotice("");
   };
 
+  const patchPosition = (id: string, next: StakingPosition | null) => {
+    if (id.startsWith(DEMO_PREFIX)) {
+      setDemoPositions((current) => {
+        if (!next) return current.filter((item) => item.id !== id);
+        return current.map((item) => (item.id === id ? next : item));
+      });
+      return;
+    }
+    setPositionEdits((current) => {
+      if (!next) {
+        const copy = { ...current };
+        delete copy[id];
+        return copy;
+      }
+      return { ...current, [id]: next };
+    });
+  };
+
   const submit = () => {
     if (!connected) {
       connect();
@@ -182,16 +211,22 @@ export function Staking() {
     }
 
     if (side === "stake") {
-      setBalances((current) => ({ ...current, [symbol]: (current[symbol] ?? 0) - value }));
+      setBalances((current) => ({
+        ...current,
+        [symbol]: (current[symbol] ?? walletBalance) - value,
+      }));
       const existing = positions.find((item) => item.eventId === targetEvent.id && item.lock === selectedLock);
       if (existing) {
-        setPositions((current) =>
-          current.map((item) => (item.id === existing.id ? { ...item, amount: item.amount + value } : item)),
-        );
+        const next = { ...existing, amount: existing.amount + value };
+        if (existing.id.startsWith(DEMO_PREFIX)) {
+          setDemoPositions((current) => current.map((item) => (item.id === existing.id ? next : item)));
+        } else {
+          setPositionEdits((current) => ({ ...current, [existing.id]: next }));
+        }
         setActivePositionId(existing.id);
       } else {
         const next: StakingPosition = {
-          id: `${targetEvent.id}-${selectedLock}-${positions.length + 1}`,
+          id: `${DEMO_PREFIX}${targetEvent.id}-${selectedLock}-${Date.now()}`,
           eventId: targetEvent.id,
           address: targetEvent.address,
           symbol: targetEvent.symbol,
@@ -201,21 +236,30 @@ export function Staking() {
           claimable: 0,
           started: Date.now(),
         };
-        setPositions((current) => [next, ...current]);
+        setDemoPositions((current) => [next, ...current]);
         setActivePositionId(next.id);
       }
-      setNotice(`Staked ${formatStakingTokens(value)} ${symbol} on the ${lockLabel(selectedLock).toLowerCase()} lock.`);
+      setNotice("Demo only — on-chain stake not wired");
     } else if (activePosition) {
-      setBalances((current) => ({ ...current, [symbol]: (current[symbol] ?? 0) + value }));
-      setPositions((current) =>
-        current.flatMap((item) => {
-          if (item.id !== activePosition.id) return [item];
-          const nextAmount = item.amount - value;
-          if (nextAmount <= 0) return [];
-          return [{ ...item, amount: nextAmount }];
-        }),
-      );
-      setNotice(`Unstaked ${formatStakingTokens(value)} ${symbol} back to the wallet.`);
+      setBalances((current) => ({
+        ...current,
+        [symbol]: (current[symbol] ?? walletBalance) + value,
+      }));
+      const nextAmount = activePosition.amount - value;
+      if (nextAmount <= 0) {
+        if (activePosition.id.startsWith(DEMO_PREFIX)) {
+          setDemoPositions((current) => current.filter((item) => item.id !== activePosition.id));
+        } else {
+          setPositionEdits((current) => ({
+            ...current,
+            [activePosition.id]: { ...activePosition, amount: 0, claimable: 0 },
+          }));
+        }
+        setActivePositionId(null);
+      } else {
+        patchPosition(activePosition.id, { ...activePosition, amount: nextAmount });
+      }
+      setNotice("Demo only — on-chain stake not wired");
     }
     setAmount("");
   };
@@ -229,12 +273,15 @@ export function Staking() {
     const payout =
       activePosition.claimable + bankedRef.current + ((performance.now() - anchorRef.current) / 1000) * perSecRef.current;
     if (payout <= 0) return;
-    setBalances((current) => ({ ...current, [symbol]: (current[symbol] ?? 0) + payout }));
-    setPositions((current) => current.map((item) => (item.id === activePosition.id ? { ...item, claimable: 0 } : item)));
+    setBalances((current) => ({
+      ...current,
+      [symbol]: (current[symbol] ?? walletBalance) + payout,
+    }));
+    patchPosition(activePosition.id, { ...activePosition, claimable: 0 });
     bankedRef.current = 0;
     anchorRef.current = performance.now();
     setElapsed(0);
-    setNotice(`Claimed ${formatStakingTokens(payout)} ${symbol}.`);
+    setNotice("Demo only — on-chain stake not wired");
   };
 
   return (
@@ -365,7 +412,7 @@ export function Staking() {
                   </div>
                   <div>
                     <dt>Days left</dt>
-                    <dd>{Math.max(0, Math.ceil((targetEvent.ends - STAKING_NOW) / DAY))}d</dd>
+                    <dd>{Math.max(0, Math.ceil((targetEvent.ends - Date.now()) / DAY))}d</dd>
                   </div>
                   <div>
                     <dt>Avg stake</dt>

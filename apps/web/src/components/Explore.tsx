@@ -3,7 +3,10 @@
 import Link from "next/link";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { formatCount, formatUsd, launches, marketStats, stagedLaunches, type Launch } from "@/lib/mock";
+import { exploreStreamUrl, getLaunches } from "@/lib/api";
+import { formatCount, formatUsd } from "@/lib/format";
+import type { LaunchWithStats } from "@/lib/types";
+import { useAsyncData } from "@/lib/use-async-data";
 import { SlidingTabs } from "./SlidingTabs";
 import { Sparkline } from "./Sparkline";
 import { TokenLogo } from "./TokenLogo";
@@ -21,6 +24,13 @@ const ranks = [
 ] as const;
 type Board = (typeof stages)[number]["id"] | (typeof ranks)[number]["id"];
 
+function boardToStage(board: Board): "new" | "almost" | "migrate" | "all" {
+  if (board === "New Pair") return "new";
+  if (board === "Almost Graduate") return "almost";
+  if (board === "Migrate") return "migrate";
+  return "all";
+}
+
 const windows = [
   { id: "latest", label: "Latest", maxHours: null },
   { id: "5m", label: "5m", maxHours: 5 / 60 },
@@ -31,7 +41,7 @@ const windows = [
 ] as const;
 type WindowId = (typeof windows)[number]["id"];
 
-const TABLE_PER_PAGE = 15;
+const TABLE_PER_PAGE = 14;
 const GRID_CARD_WIDTH = 272;
 const GRID_GAP = 8;
 const GRID_ROWS = 3;
@@ -47,27 +57,14 @@ function gridLayoutForWidth(width: number) {
 }
 
 const MAX_MCAP = 85_000_000;
-const MAX_CHANGE = 999;
 
-function clampMcap(value: number) {
-  return Math.min(MAX_MCAP, Math.max(900, Math.round(value)));
-}
-
-function clampChange(value: number) {
-  return Number(Math.max(-99, Math.min(MAX_CHANGE, value)).toFixed(1));
-}
-
-function seedVolume(launch: Launch) {
-  return marketStats(launch).volume24h;
-}
-
-function activityScore(launch: Launch, volume: number) {
+function activityScore(launch: LaunchWithStats, volume: number) {
   return volume * (1 + Math.abs(launch.change1h) / 25);
 }
 
-function byActivity(a: Launch, b: Launch, volumes: Record<string, number>) {
-  const scoreA = activityScore(a, volumes[a.address] ?? seedVolume(a));
-  const scoreB = activityScore(b, volumes[b.address] ?? seedVolume(b));
+function byActivity(a: LaunchWithStats, b: LaunchWithStats) {
+  const scoreA = activityScore(a, a.stats.volume24h);
+  const scoreB = activityScore(b, b.stats.volume24h);
   if (scoreB !== scoreA) return scoreB - scoreA;
   return b.marketCap - a.marketCap;
 }
@@ -80,19 +77,56 @@ function ageHours(age: string) {
   return value;
 }
 
-function nudge(coin: Launch, volatile = false): { coin: Launch; dir: "up" | "down" } {
-  const swing = volatile ? Math.random() * 14 - 5 : Math.random() * 9 - 4;
-  const delta = Number(swing.toFixed(1));
-  const mcapMul = volatile ? 1 + delta / 55 : 1 + delta / 80;
-  const marketCap = clampMcap(coin.marketCap * mcapMul);
-  return {
-    dir: marketCap >= coin.marketCap ? "up" : "down",
-    coin: {
-      ...coin,
-      marketCap,
-      change1h: clampChange(coin.change1h + delta * (volatile ? 0.55 : 0.45)),
-    },
+/** % change for the selected time window (Dex fields). */
+function windowChangePct(launch: LaunchWithStats, windowId: WindowId): number {
+  if (windowId === "5m" || windowId === "1h") return launch.change1h || 0;
+  if (windowId === "6h") return launch.stats.change6h || launch.change1h || 0;
+  if (windowId === "24h" || windowId === "48h") return launch.stats.change24h || 0;
+  return 0;
+}
+
+function byWindowMovers(windowId: WindowId) {
+  return (a: LaunchWithStats, b: LaunchWithStats) => {
+    const score = (launch: LaunchWithStats) => {
+      const ch = Math.abs(windowChangePct(launch, windowId));
+      return (launch.stats.volume24h || 0) * (1 + ch / 25) + ch * 100;
+    };
+    const d = score(b) - score(a);
+    if (d !== 0) return d;
+    return b.marketCap - a.marketCap;
   };
+}
+
+function byNewest(a: LaunchWithStats, b: LaunchWithStats) {
+  const ageCmp = ageHours(a.stats.age) - ageHours(b.stats.age);
+  if (Math.abs(ageCmp) > 0.01) return ageCmp;
+  return a.progress - b.progress;
+}
+
+/** Session peak mcap — keeps ATH after dips so sparkles can turn off. */
+const athPeakByToken = new Map<string, number>();
+
+function resolveAth(launch: LaunchWithStats) {
+  const key = launch.address.toLowerCase();
+  let fromSpark = 0;
+  if (launch.priceUsd > 0 && launch.sparkline && launch.sparkline.length >= 2) {
+    const sparkMax = Math.max(...launch.sparkline);
+    if (sparkMax > launch.priceUsd) {
+      fromSpark = launch.marketCap * (sparkMax / launch.priceUsd);
+    }
+  }
+  const peak = Math.max(
+    athPeakByToken.get(key) ?? 0,
+    launch.stats.ath || 0,
+    launch.marketCap || 0,
+    fromSpark,
+  );
+  athPeakByToken.set(key, peak);
+  const capped = Math.min(MAX_MCAP, peak);
+  const progress = capped > 0 ? Math.min(100, Math.round((launch.marketCap / capped) * 100)) : 0;
+  // Only "at ATH" when within ~2% of the remembered peak (not every row).
+  const atAth = capped > 0 && launch.marketCap >= capped * 0.98;
+  return { athValue: capped, progress, atAth };
 }
 
 function digitFrames(before: string, after: string, dir?: "up" | "down") {
@@ -302,6 +336,68 @@ export function Explore() {
   const query = (params.get("q") ?? "").trim().toLowerCase();
   const [board, setBoard] = useState<Board>("New Pair");
   const [boardTab, setBoardTab] = useState<Board>("New Pair");
+  const stage = boardToStage(board);
+  const { data, error, loading } = useAsyncData(
+    () => getLaunches({ limit: 500, stage }),
+    [stage],
+    {
+      initial: [],
+      // Backup poll; live creates arrive via SSE
+      pollMs: stage === "new" || stage === "almost" ? 15000 : 20000,
+    },
+  );
+  const [livePush, setLivePush] = useState<LaunchWithStats[]>([]);
+  const feed = useMemo(() => {
+    if (stage !== "new" && stage !== "almost") return data;
+    const map = new Map<string, LaunchWithStats>();
+    for (const row of livePush) map.set(row.address.toLowerCase(), row);
+    for (const row of data) {
+      const key = row.address.toLowerCase();
+      if (!map.has(key)) map.set(key, row);
+    }
+    return [...map.values()];
+  }, [data, livePush, stage]);
+
+  useEffect(() => {
+    setLivePush([]);
+  }, [stage]);
+
+  useEffect(() => {
+    if (stage !== "new" && stage !== "almost") return;
+    let es: EventSource | null = null;
+    try {
+      es = new EventSource(exploreStreamUrl());
+    } catch {
+      return;
+    }
+
+    const onNew = (ev: MessageEvent) => {
+      try {
+        const card = JSON.parse(String(ev.data)) as LaunchWithStats;
+        if (!card?.address) return;
+        setLivePush((prev) => {
+          const key = card.address.toLowerCase();
+          const without = prev.filter((p) => p.address.toLowerCase() !== key);
+          return [card, ...without].slice(0, 200);
+        });
+      } catch {
+        /* ignore */
+      }
+    };
+
+    es.addEventListener("newToken", onNew);
+    es.addEventListener("tokenUpdate", onNew);
+    es.onerror = () => {
+      /* browser will retry EventSource */
+    };
+
+    return () => {
+      es?.removeEventListener("newToken", onNew);
+      es?.removeEventListener("tokenUpdate", onNew);
+      es?.close();
+    };
+  }, [stage]);
+
   const [windowId, setWindowId] = useState<WindowId>("latest");
   const [windowTab, setWindowTab] = useState<WindowId>("latest");
   const [view, setView] = useState<"table" | "grid">("table");
@@ -312,22 +408,6 @@ export function Explore() {
   const [viewOut, setViewOut] = useState(false);
   const [gridPerPage, setGridPerPage] = useState(GRID_PER_PAGE_MIN);
   const [phone, setPhone] = useState(false);
-  const [feed, setFeed] = useState(launches);
-  const [fresh, setFresh] = useState<Set<string>>(() => new Set());
-  const [athBurst, setAthBurst] = useState<Record<string, number>>({});
-  const [ticks, setTicks] = useState<Record<string, { dir: "up" | "down"; n: number }>>({});
-  const [volumes, setVolumes] = useState<Record<string, number>>(() => {
-    const next: Record<string, number> = {};
-    [...launches, ...stagedLaunches].forEach((coin) => {
-      next[coin.address] = seedVolume(coin);
-    });
-    return next;
-  });
-  const feedRef = useRef(launches);
-  const volumesRef = useRef(volumes);
-  volumesRef.current = volumes;
-  const visibleRef = useRef<string[]>([]);
-  const hotRef = useRef<string[]>([]);
   const rowEls = useRef(new Map<string, HTMLElement>());
   const flipTops = useRef(new Map<string, number>());
   const skipFlip = useRef(true);
@@ -335,21 +415,6 @@ export function Explore() {
   const gridBoardRef = useRef<HTMLDivElement | null>(null);
   const pageFadeRef = useRef<number | null>(null);
   const viewFadeRef = useRef<number | null>(null);
-  const queueRef = useRef(stagedLaunches);
-  const athRef = useRef<Map<string, number> | null>(null);
-  if (!athRef.current) {
-    const ath = new Map<string, number>();
-    // Seed ATH just above live mcap so breakouts can fire often in the mock feed.
-    launches.forEach((coin) => ath.set(coin.address, Math.max(coin.marketCap, Math.round(coin.marketCap * 1.02))));
-    athRef.current = ath;
-  }
-  const bornRef = useRef<Map<string, number> | null>(null);
-  if (!bornRef.current) {
-    const born = new Map<string, number>();
-    launches.forEach((coin, index) => born.set(coin.address, index + 1));
-    bornRef.current = born;
-  }
-  const nextBorn = useRef(launches.length + 1);
 
   useEffect(() => {
     const media = window.matchMedia("(max-width: 860px)");
@@ -386,211 +451,22 @@ export function Explore() {
     return () => observer.disconnect();
   }, [phone, view]);
 
-  // Soft-reset any runaway mock values from a hot reload.
-  useEffect(() => {
-    setFeed((current) => {
-      const next = current.map((coin) => ({
-        ...coin,
-        marketCap: clampMcap(coin.marketCap),
-        change1h: clampChange(coin.change1h),
-      }));
-      feedRef.current = next;
-      return next;
-    });
-    setVolumes((current) => {
-      const next: Record<string, number> = {};
-      Object.entries(current).forEach(([address, value]) => {
-        const coin = feedRef.current.find((item) => item.address === address);
-        const ceiling = Math.min(MAX_MCAP * 3, Math.max((coin?.marketCap ?? 10_000) * 6, 8_000));
-        next[address] = Math.min(value, ceiling);
-      });
-      volumesRef.current = next;
-      return next;
-    });
-  }, []);
-
-  useEffect(() => {
-    const timers: number[] = [];
-    const markFresh = (address: string) => {
-      if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
-      setFresh((current) => new Set(current).add(address));
-      timers.push(
-        window.setTimeout(() => {
-          setFresh((current) => {
-            const next = new Set(current);
-            next.delete(address);
-            return next;
-          });
-        }, 5200),
-      );
-    };
-
-    const markAthBurst = (address: string) => {
-      if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
-      setAthBurst((current) => ({ ...current, [address]: (current[address] ?? 0) + 1 }));
-      timers.push(
-        window.setTimeout(() => {
-          setAthBurst((current) => {
-            const next = { ...current };
-            delete next[address];
-            return next;
-          });
-        }, 700),
-      );
-    };
-
-    const markTick = (address: string, dir: "up" | "down") => {
-      if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
-      setTicks((current) => ({
-        ...current,
-        [address]: { dir, n: (current[address]?.n ?? 0) + 1 },
-      }));
-    };
-
-    const bumpVolume = (address: string, boost = false) => {
-      setVolumes((current) => {
-        const coin = feedRef.current.find((item) => item.address === address);
-        const ceiling = Math.min(MAX_MCAP * 3, Math.max((coin?.marketCap ?? 10_000) * 6, 8_000));
-        const prev = Math.min(ceiling, current[address] ?? volumesRef.current[address] ?? 1_000);
-        const delta = boost ? 0.06 + Math.random() * 0.12 : Math.random() * 0.05 - 0.015;
-        const next = Math.min(ceiling, Math.max(400, Math.round(prev * (1 + delta))));
-        const book = { ...current, [address]: next };
-        volumesRef.current = book;
-        return book;
-      });
-    };
-
-    const applyCoin = (target: Launch, coin: Launch, hitAth: boolean, dir: "up" | "down") => {
-      const safe = {
-        ...coin,
-        marketCap: clampMcap(coin.marketCap),
-        change1h: clampChange(coin.change1h),
-      };
-      const athBook = athRef.current ?? new Map<string, number>();
-      let ath = athBook.get(target.address) ?? target.marketCap;
-      if (safe.marketCap > ath) {
-        ath = safe.marketCap;
-        hitAth = true;
-      }
-      athBook.set(target.address, Math.min(MAX_MCAP, ath));
-      athRef.current = athBook;
-      const next = feedRef.current.map((item) => (item.address === target.address ? safe : item));
-      feedRef.current = next;
-      setFeed(next);
-      bumpVolume(safe.address, hitAth || dir === "up");
-      markTick(safe.address, hitAth || dir === "up" ? "up" : dir);
-      if (hitAth) markAthBurst(safe.address);
-    };
-
-    const pushAthBreak = (target: Launch) => {
-      if (target.marketCap >= MAX_MCAP * 0.98) {
-        applyCoin(target, nudge(target, true).coin, false, "up");
-        return;
-      }
-      const athBook = athRef.current ?? new Map<string, number>();
-      const prev = athBook.get(target.address) ?? target.marketCap;
-      const nextAth = clampMcap(prev * (1.015 + Math.random() * 0.03));
-      const coin = {
-        ...target,
-        marketCap: nextAth,
-        change1h: clampChange(Math.abs(target.change1h) + 1.2 + Math.random() * 3),
-      };
-      applyCoin(target, coin, true, "up");
-    };
-
-    const pickHot = (visible: string[]) => {
-      const keep = hotRef.current.filter((address) => visible.includes(address));
-      const need = Math.min(2, visible.length);
-      while (keep.length < need) {
-        const pool = visible.filter((address) => !keep.includes(address));
-        if (!pool.length) break;
-        // Prefer top-of-list slots so volatility stays on-screen.
-        keep.push(pool[Math.floor(Math.random() * Math.min(4, pool.length))]);
-      }
-      hotRef.current = keep.slice(0, need);
-    };
-
-    const step = { current: 0 };
-    const id = window.setInterval(() => {
-      step.current += 1;
-      const spawn = queueRef.current[0];
-      // Rare spawn so the volatile pair stays the focus.
-      if (spawn && step.current % 28 === 0) {
-        queueRef.current = queueRef.current.slice(1);
-        bornRef.current?.set(spawn.address, nextBorn.current);
-        nextBorn.current += 1;
-        athRef.current?.set(spawn.address, Math.max(spawn.marketCap, Math.round(spawn.marketCap * 1.02)));
-        setVolumes((current) => {
-          const book = { ...current, [spawn.address]: seedVolume(spawn) };
-          volumesRef.current = book;
-          return book;
-        });
-        const next = [spawn, ...feedRef.current];
-        feedRef.current = next;
-        setFeed(next);
-        markFresh(spawn.address);
-        return;
-      }
-
-      const visible = visibleRef.current;
-      if (!visible.length) return;
-      if (step.current === 1 || step.current % 18 === 0 || hotRef.current.length === 0) {
-        pickHot(visible);
-      } else {
-        // Drop any hot coin that scrolled off the page.
-        hotRef.current = hotRef.current.filter((address) => visible.includes(address));
-        if (hotRef.current.length < Math.min(2, visible.length)) pickHot(visible);
-      }
-
-      const hot = hotRef.current;
-      if (!hot.length) return;
-
-      // Alternate the 1–2 hot rows so only they tick — fast + volatile.
-      const address = hot[step.current % hot.length];
-      const target = feedRef.current.find((item) => item.address === address);
-      if (!target) return;
-
-      if (Math.random() > 0.72) {
-        pushAthBreak(target);
-        return;
-      }
-
-      const updated = nudge(target, true);
-      applyCoin(target, updated.coin, false, updated.dir);
-    }, 320);
-
-    return () => {
-      window.clearInterval(id);
-      timers.forEach((timer) => window.clearTimeout(timer));
-    };
-  }, []);
-
   const rows = useMemo(() => {
-    const maxHours = windows.find((item) => item.id === windowId)?.maxHours ?? null;
     const matched = feed.filter((launch) => {
       const text = `${launch.name} ${launch.symbol}`.toLowerCase();
       if (query && !text.includes(query)) return false;
-      if (maxHours != null && ageHours(marketStats(launch).age) > maxHours) return false;
-      if (board === "Movers" || board === "Trending") return true;
-      if (board === "Migrate") return launch.phase === "graduated";
-      if (board === "Almost Graduate") return launch.phase !== "graduated" && launch.progress >= 70;
-      return launch.phase !== "graduated" && launch.progress < 50;
+      return true;
     });
-    if (board === "New Pair") {
-      const born = bornRef.current ?? new Map<string, number>();
-      const liveAfter = launches.length;
-      return [...matched].sort((a, b) => {
-        const aBorn = born.get(a.address) ?? 0;
-        const bBorn = born.get(b.address) ?? 0;
-        const aLive = aBorn > liveAfter;
-        const bLive = bBorn > liveAfter;
-        if (aLive || bLive) return bBorn - aBorn;
-        return a.progress - b.progress;
-      });
+
+    // Time tabs sort the full list (don't drop rows) so table stays 14/page + pager.
+    if (windowId !== "latest") {
+      return [...matched].sort(byWindowMovers(windowId));
     }
-    // Almost Graduate / Migrate / Movers / Trending: busiest volume + move first.
-    return [...matched].sort((a, b) => byActivity(a, b, volumes));
-  }, [board, feed, query, volumes, windowId]);
+    if (board === "New Pair") {
+      return [...matched].sort(byNewest);
+    }
+    return [...matched].sort(byActivity);
+  }, [board, feed, query, windowId]);
 
   useEffect(() => {
     setTablePage(1);
@@ -664,15 +540,6 @@ export function Explore() {
     };
   }, []);
 
-  const useGrid = phone || view === "grid";
-  const shown = useGrid ? gridRows : tableRows;
-  visibleRef.current = shown.map((launch) => launch.address);
-
-  const liveVolume = (launch: Launch) => {
-    const raw = volumes[launch.address] ?? marketStats(launch).volume24h;
-    return Math.min(raw, Math.max(launch.marketCap * 6, 8_000), MAX_MCAP * 3);
-  };
-
   useEffect(() => {
     setGridPage(1);
   }, [gridPerPage]);
@@ -680,7 +547,6 @@ export function Explore() {
   useEffect(() => {
     skipFlip.current = true;
     flipTops.current.clear();
-    hotRef.current = [];
   }, [safeTablePage, safeGridPage, phone, board]);
 
   useLayoutEffect(() => {
@@ -751,8 +617,16 @@ export function Explore() {
     else rowEls.current.delete(address);
   };
 
+  const statusNote = loading && feed.length === 0
+    ? "Loading launches…"
+    : error && feed.length === 0
+      ? error
+      : !loading && feed.length === 0
+        ? "No launches yet."
+        : null;
+
   return (
-    <div>
+    <div className="explore-page">
       <div className="page-head">
         <h1 className="explore-title">Explore coins</h1>
         {phone ? null : (
@@ -768,6 +642,7 @@ export function Explore() {
           />
         )}
       </div>
+      {statusNote ? <p className="page-note">{statusNote}</p> : null}
       <div className="explore-tools">
         <SlidingTabs
           ariaLabel="Launch stage"
@@ -818,23 +693,14 @@ export function Explore() {
             </thead>
             <tbody className={`page-swap${pageOut ? " is-out" : ""}`}>
               {tableRows.map((launch, index) => {
-                const stats = marketStats(launch);
-                const volume = liveVolume(launch);
-                const athValue = Math.min(
-                  MAX_MCAP,
-                  athRef.current?.get(launch.address) ?? stats.ath,
-                );
-                const progress = Math.min(100, Math.round((launch.marketCap / athValue) * 100));
-                const arrived = board === "New Pair" && fresh.has(launch.address);
-                const burst = athBurst[launch.address];
-                const atAth = progress >= 99 || Boolean(burst);
-                const tick = ticks[launch.address];
+                const { stats } = launch;
+                const volume = stats.volume24h;
+                const { athValue, progress, atAth } = resolveAth(launch);
                 const rank = (safeTablePage - 1) * TABLE_PER_PAGE + index + 1;
                 return (
                   <tr
                     key={launch.address}
                     ref={bindRow(launch.address)}
-                    className={arrived ? "is-new" : undefined}
                     onClick={() => router.push(`/token/${launch.address}`)}
                   >
                     <td>
@@ -843,48 +709,49 @@ export function Explore() {
                         className="coin-cell"
                         onClick={(event) => event.stopPropagation()}
                       >
-                        <span className="num w-6 text-[var(--muted)]">{rank}</span>
-                        <TokenLogo symbol={launch.symbol} size={26} />
+                        <span className="coin-rank">{rank}</span>
+                        <TokenLogo symbol={launch.symbol} size={26} src={launch.logoUrl} />
                         <span className="coin-name">{launch.name}</span>
                         <span className="ticker text-[var(--muted)]">${launch.symbol}</span>
                       </Link>
                     </td>
                     <td>
-                      <Sparkline seed={launch.symbol} width={76} height={24} />
+                      <Sparkline
+                        seed={launch.symbol}
+                        width={76}
+                        height={24}
+                        values={launch.sparkline}
+                        up={(launch.change1h || launch.stats.change24h) >= 0}
+                      />
                     </td>
                     <td className={launch.change1h >= 0 ? "up" : "down"}>
-                      <TickValue value={formatUsd(launch.marketCap)} dir={tick?.dir} nonce={tick?.n} />
+                      <TickValue value={formatUsd(launch.marketCap)} />
                     </td>
                     <td>
                       <AthMeter
                         value={formatUsd(athValue)}
                         progress={progress}
                         atAth={atAth}
-                        burst={burst}
                         seed={launch.address}
                       />
                     </td>
                     <td>{stats.age}</td>
                     <td>{formatCount(stats.txns)}</td>
                     <td>
-                      <TickValue value={formatUsd(volume)} dir={tick?.dir} nonce={tick?.n} />
+                      <TickValue value={formatUsd(volume)} />
                     </td>
                     <td>
-                      <TickValue value={formatUsd(stats.boxUsd)} dir={tick?.dir} nonce={tick?.n} />
+                      <TickValue value={formatUsd(stats.boxUsd)} />
                     </td>
                     <td className={launch.change1h >= 0 ? "up" : "down"}>
                       <TickValue
                         value={`${launch.change1h >= 0 ? "↑" : "↓"} ${Math.abs(launch.change1h).toFixed(1)}%`}
-                        dir={tick?.dir}
-                        nonce={tick?.n}
                         tone="pct"
                       />
                     </td>
                     <td className={stats.change24h >= 0 ? "up" : "down"}>
                       <TickValue
                         value={`${stats.change24h >= 0 ? "↑" : "↓"} ${Math.abs(stats.change24h).toFixed(1)}%`}
-                        dir={tick?.dir}
-                        nonce={tick?.n}
                         tone="pct"
                       />
                     </td>
@@ -894,7 +761,7 @@ export function Explore() {
             </tbody>
           </table>
           </div>
-          {rows.length > TABLE_PER_PAGE ? (
+          {tablePages > 1 ? (
             <Pager page={safeTablePage} pages={tablePages} onChange={(page) => goPage("table", page)} />
           ) : null}
         </div>
@@ -903,22 +770,18 @@ export function Explore() {
           <div className="pair-grid-panel">
             <div className={`pair-grid page-swap${pageOut ? " is-out" : ""}`}>
             {gridRows.map((launch) => {
-              const stats = marketStats(launch);
-              const volume = liveVolume(launch);
-              const athValue = Math.min(MAX_MCAP, athRef.current?.get(launch.address) ?? stats.ath);
-              const progress = Math.min(100, Math.round((launch.marketCap / athValue) * 100));
-              const arrived = board === "New Pair" && fresh.has(launch.address);
-              const burst = athBurst[launch.address];
-              const atAth = progress >= 99 || Boolean(burst);
+              const { stats } = launch;
+              const volume = stats.volume24h;
+              const { athValue, progress, atAth } = resolveAth(launch);
               return (
                 <Link
                   key={launch.address}
                   href={`/token/${launch.address}`}
                   ref={bindRow(launch.address)}
-                  className={`pair-card${arrived ? " is-new" : ""}`}
+                  className="pair-card"
                 >
                   <div className="pair-head">
-                    <TokenLogo symbol={launch.symbol} size={40} />
+                    <TokenLogo symbol={launch.symbol} size={40} src={launch.logoUrl} />
                     <div className="pair-id">
                       <p>{launch.name}</p>
                       <p>${launch.symbol}</p>
@@ -928,7 +791,14 @@ export function Explore() {
                     </p>
                   </div>
                   <div className="pair-chart">
-                    <Sparkline seed={launch.symbol} width={240} height={36} fluid />
+                    <Sparkline
+                      seed={launch.symbol}
+                      width={240}
+                      height={36}
+                      fluid
+                      values={launch.sparkline}
+                      up={(launch.change1h || launch.stats.change24h) >= 0}
+                    />
                     <div className="pair-mcap">
                       <span>Mcap</span>
                       <strong className={launch.change1h >= 0 ? "up" : "down"}>{formatUsd(launch.marketCap)}</strong>
@@ -951,7 +821,6 @@ export function Explore() {
                           value={formatUsd(athValue)}
                           progress={progress}
                           atAth={atAth}
-                          burst={burst}
                           seed={launch.address}
                         />
                       </dd>
@@ -990,7 +859,7 @@ export function Explore() {
         </div>
       )}
       </div>
-      {rows.length === 0 && (
+      {!loading && !error && feed.length > 0 && rows.length === 0 && (
         <p className="mt-8 text-sm text-[var(--muted)]">
           {query ? "No coins match that search." : "No coins in that window."}
         </p>

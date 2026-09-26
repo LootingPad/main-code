@@ -1,9 +1,14 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import { emptyStats, getFees, getLaunchHolders, getLaunchTrades } from "@/lib/api";
 import { DRAFT_KEY } from "@/lib/draft";
+import { ETH_USD } from "@/lib/fees";
+import { formatPrice, formatUsd, shortAddress } from "@/lib/format";
 import { PONS_LAUNCH_WINDOW } from "@/lib/launch-window";
-import { formatPrice, formatUsd, marketStats, shortAddress, type Launch } from "@/lib/mock";
+import type { Holder, Launch, LaunchWithStats, MarketStats, TokenTrade } from "@/lib/types";
+import { useAsyncData } from "@/lib/use-async-data";
 import { GiftIcon, WalletIcon } from "./Icons";
 import { Pager } from "./Pager";
 import { SlidingTabs } from "./SlidingTabs";
@@ -11,11 +16,19 @@ import { Sparkline } from "./Sparkline";
 import { TokenLogo } from "./TokenLogo";
 import { useWallet } from "./Wallet";
 
+function resolveStats(launch: Launch | LaunchWithStats, initialStats?: MarketStats): MarketStats {
+  if (initialStats) return initialStats;
+  if ("stats" in launch && launch.stats) return launch.stats;
+  return emptyStats();
+}
+
 export function Terminal({
   launch,
   meta,
+  initialStats,
 }: {
-  launch: Launch;
+  launch: Launch | LaunchWithStats;
+  initialStats?: MarketStats;
   meta?: {
     website?: string;
     twitter?: string;
@@ -31,6 +44,21 @@ export function Terminal({
 }) {
   const { connected, address, connect } = useWallet();
   const quoteAsset = meta?.pair || "ETH";
+  const stats = resolveStats(launch, initialStats);
+  const { data: fees } = useAsyncData(() => getFees(), [], {
+    initial: null as Awaited<ReturnType<typeof getFees>> | null,
+  });
+  const ethUsd = fees?.ETH_USD ?? ETH_USD;
+  const { data: holders } = useAsyncData(
+    () => getLaunchHolders(launch.address),
+    [launch.address],
+    { initial: [] as Holder[], enabled: !launch.draft },
+  );
+  const { data: trades } = useAsyncData(
+    () => getLaunchTrades(launch.address, { limit: 50 }),
+    [launch.address],
+    { initial: [] as TokenTrade[], enabled: !launch.draft },
+  );
   const [side, setSide] = useState<"buy" | "sell">("buy");
   const [dockOpen, setDockOpen] = useState(false);
   const [slippage, setSlippage] = useState("10");
@@ -51,9 +79,8 @@ export function Terminal({
   const quote = useMemo(() => {
     const value = Number(amount);
     if (!Number.isFinite(value) || value <= 0 || launch.priceUsd <= 0) return 0;
-    const ethUsd = 3500;
     return side === "buy" ? (value * ethUsd) / launch.priceUsd : (value * launch.priceUsd) / ethUsd;
-  }, [amount, launch.priceUsd, side]);
+  }, [amount, ethUsd, launch.priceUsd, side]);
 
   const up = launch.change1h >= 0;
   const creatorShare = 100 - launch.luckyShare;
@@ -77,11 +104,9 @@ export function Terminal({
   const [presetDraft, setPresetDraft] = useState(["0.1", "0.25", "0.5", "1"]);
   const [presetError, setPresetError] = useState("");
   const presetRef = useRef<HTMLDivElement>(null);
-  const accruedEth = (launch.marketCap / 3500) * (launch.creatorTax / 100) * (0.35 + launch.progress / 200);
+  const accruedEth = (launch.marketCap / ethUsd) * (launch.creatorTax / 100) * (0.35 + launch.progress / 200);
   const creatorEth = (accruedEth * creatorShare) / 100;
   const poolEth = (accruedEth * launch.luckyShare) / 100;
-  const holders = holdersFor(launch);
-  const trades = tradesFor(launch);
   const pageSize = 10;
   const dataRows = dataTab === "holders" ? holders : trades;
   const pages = Math.max(1, Math.ceil(dataRows.length / pageSize));
@@ -256,16 +281,51 @@ export function Terminal({
             </div>
             <p>{launch.description}</p>
           </div>
-          {links.length > 0 && (
-            <div className="token-link-card">
-              {links.map((item) => (
-                <a key={item.label} href={item.href} target="_blank" rel="noreferrer" aria-label={item.label} title={item.label}>
-                  <LinkGlyph label={item.label} />
-                </a>
-              ))}
-            </div>
-          )}
-          {launch.draft && <span className="token-pill is-draft">Draft</span>}
+          <div className="token-head-actions">
+            {(launch.locked || launch.socialUpdated || (launch.dexBoost ?? 0) > 0) && (
+              <div className="token-badges" aria-label="Token signals">
+                {launch.locked ? (
+                  <span className="token-badge is-lock" data-tip="Token Locked" aria-label="Token Locked">
+                    <LockBadgeIcon />
+                  </span>
+                ) : null}
+                {launch.socialUpdated ? (
+                  <a
+                    className="token-badge is-social"
+                    href={`https://dexscreener.com/search?q=${encodeURIComponent(launch.address)}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    data-tip="Dex profile updated"
+                    aria-label="Dex profile updated"
+                  >
+                    <DexscreenerBadgeIcon />
+                  </a>
+                ) : null}
+                {(launch.dexBoost ?? 0) > 0 ? (
+                  <a
+                    className="token-badge is-boost"
+                    href={`https://dexscreener.com/search?q=${encodeURIComponent(launch.address)}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    data-tip={`DexBoost ${launch.dexBoost}x`}
+                    aria-label={`DexBoost ${launch.dexBoost}x`}
+                  >
+                    <BoostBadgeIcon />
+                  </a>
+                ) : null}
+              </div>
+            )}
+            {links.length > 0 && (
+              <div className="token-link-card">
+                {links.map((item) => (
+                  <a key={item.label} href={item.href} target="_blank" rel="noreferrer" aria-label={item.label} title={item.label}>
+                    <LinkGlyph label={item.label} />
+                  </a>
+                ))}
+              </div>
+            )}
+            {launch.draft && <span className="token-pill is-draft">Draft</span>}
+          </div>
         </header>
 
         {launch.draft ? (
@@ -695,7 +755,8 @@ export function Terminal({
           symbol={launch.symbol}
           price={launch.priceUsd}
           marketCap={launch.marketCap}
-          ath={marketStats(launch).ath}
+          ath={stats.ath}
+          ethUsd={ethUsd}
           amount={mine.amount}
           entry={mine.entry}
           wallet={address}
@@ -783,6 +844,7 @@ function Position({
   price,
   marketCap,
   ath,
+  ethUsd,
   amount,
   entry,
   wallet,
@@ -791,6 +853,7 @@ function Position({
   price: number;
   marketCap: number;
   ath: number;
+  ethUsd: number;
   amount: number;
   entry: number;
   wallet: string;
@@ -803,6 +866,7 @@ function Position({
   const multiple = entry > 0 ? price / entry : 0;
   const up = pnl >= 0;
   const [unit, setUnit] = useState<"usd" | "eth">("usd");
+  const [shareOpen, setShareOpen] = useState(false);
   const [shown, setShown] = useState<Record<PnlField, boolean>>({
     symbol: true,
     pnl: true,
@@ -813,7 +877,108 @@ function Position({
     ath: true,
   });
   const scene = useMemo(() => pnlScenes[Math.floor(Math.random() * pnlScenes.length)], [symbol]);
-  const money = (usd: number) => (unit === "usd" ? formatUsd(usd) : formatEth(usd / 3500));
+  const money = (usd: number) => (unit === "usd" ? formatUsd(usd) : formatEth(usd / ethUsd));
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState("");
+  const [portalReady, setPortalReady] = useState(false);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const multipleLabel = multiple >= 10 ? `${multiple.toFixed(1)}x` : `${multiple.toFixed(2)}x`;
+  const pnlLabel = `${up ? "+" : ""}${pnl.toFixed(1)}%`;
+  const valueLabel = money(value);
+  const shareText = `$${symbol} ${pnlLabel} · ${valueLabel} on LOOTING`;
+  const sharePayload = useMemo(
+    () => ({
+      scene,
+      symbol,
+      pnlLabel,
+      up,
+      valueLabel,
+      multipleLabel,
+      walletLabel: dottedAddress(wallet),
+      entryLabel: `Entry ${formatUsd(entryMcap)}`,
+      athLabel: `ATH ${formatUsd(ath)}`,
+      shown,
+    }),
+    [ath, entryMcap, multipleLabel, pnlLabel, scene, shown, symbol, up, valueLabel, wallet],
+  );
+
+  useEffect(() => {
+    setPortalReady(true);
+  }, []);
+
+  useEffect(() => {
+    if (!shareOpen) return;
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    let cancel = false;
+    void paintPnlShareCard(sharePayload, canvas).then(() => {
+      if (cancel) return;
+    });
+    return () => {
+      cancel = true;
+    };
+  }, [shareOpen, sharePayload]);
+
+  useEffect(() => {
+    if (!shareOpen) return;
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = prev;
+    };
+  }, [shareOpen]);
+
+  async function makeShareBlob() {
+    const canvas = canvasRef.current;
+    if (!canvas) return paintPnlShareCard(sharePayload);
+    await paintPnlShareCard(sharePayload, canvas);
+    return new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png"));
+  }
+
+  async function saveImage() {
+    if (busy) return;
+    setBusy(true);
+    setNote("");
+    try {
+      const blob = await makeShareBlob();
+      if (!blob) return;
+      downloadBlob(blob, `looting-${symbol.toLowerCase()}-pnl.png`);
+      setNote("Image saved");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function shareTwitter() {
+    if (busy) return;
+    setBusy(true);
+    setNote("");
+    try {
+      const blob = await makeShareBlob();
+      if (!blob) return;
+      const file = new File([blob], `looting-${symbol.toLowerCase()}-pnl.png`, { type: "image/png" });
+      const payload = { files: [file], title: "LOOTING position", text: shareText };
+      if (navigator.canShare?.(payload)) {
+        try {
+          await navigator.share(payload);
+          setNote("Shared");
+          return;
+        } catch (error) {
+          if (error instanceof DOMException && error.name === "AbortError") return;
+        }
+      }
+      downloadBlob(blob, file.name);
+      window.open(
+        `https://twitter.com/intent/tweet?text=${encodeURIComponent(shareText)}`,
+        "_blank",
+        "noopener,noreferrer",
+      );
+      setNote("Image saved — attach it on X");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <>
       <section className="sheet position-card">
@@ -845,53 +1010,238 @@ function Position({
             </dd>
           </div>
         </dl>
+        <button
+          type="button"
+          className="position-share"
+          onClick={() => {
+            setShareOpen(true);
+            setNote("");
+          }}
+        >
+          Share
+        </button>
       </section>
-      <figure className="pnl-card">
-        <img className="pnl-scene" src={scene} alt="" loading="lazy" decoding="async" />
-        <span className="pnl-logo-wrap">
-          <img className="pnl-logo" src="/logo-wordmark.png" alt="LOOTING" loading="lazy" decoding="async" />
-        </span>
-        <figcaption className="pnl-copy">
-          {shown.symbol ? <span className="pnl-symbol">${symbol}</span> : null}
-          {shown.pnl ? (
-            <strong className={up ? "is-up" : "is-down"}>
-              {up ? "+" : ""}
-              {pnl.toFixed(1)}%
-            </strong>
-          ) : null}
-          {shown.value ? <span className="pnl-value">{money(value)}</span> : null}
-          {shown.multiple ? <span className="pnl-multiple">{multiple >= 10 ? `${multiple.toFixed(1)}x` : `${multiple.toFixed(2)}x`}</span> : null}
-        </figcaption>
-        {shown.wallet || shown.entry || shown.ath ? (
-          <p className="pnl-foot">
-            {shown.wallet ? <span>{dottedAddress(wallet)}</span> : null}
-            {shown.entry ? <span>Entry {formatUsd(entryMcap)}</span> : null}
-            {shown.ath ? <span>ATH {formatUsd(ath)}</span> : null}
-          </p>
-        ) : null}
-      </figure>
-      <div className="pnl-controls">
-        <div className="pnl-setting">
-          <span>Show in</span>
-          <div className="seg pnl-unit">
-            <button type="button" className={unit === "usd" ? "on" : ""} onClick={() => setUnit("usd")}>
-              $
-            </button>
-            <button type="button" className={unit === "eth" ? "on" : ""} onClick={() => setUnit("eth")}>
-              ETH
-            </button>
-          </div>
-        </div>
-        <div className="pnl-flags">
-          {pnlFields.map(([key, label]) => (
-            <button key={key} type="button" className={shown[key] ? "on" : ""} aria-pressed={shown[key]} onClick={() => setShown((current) => ({ ...current, [key]: !current[key] }))}>
-              {label}
-            </button>
-          ))}
-        </div>
-      </div>
+
+      {shareOpen && portalReady
+        ? createPortal(
+            <div
+              className="position-share-overlay"
+              role="dialog"
+              aria-modal="true"
+              aria-label="Share position"
+              onClick={() => setShareOpen(false)}
+            >
+              <div className="position-share-pop" onClick={(event) => event.stopPropagation()}>
+                <header className="position-share-head">
+                  <span>Share card</span>
+                  <button type="button" className="position-share-close" onClick={() => setShareOpen(false)} aria-label="Close">
+                    Close
+                  </button>
+                </header>
+                <canvas
+                  ref={canvasRef}
+                  className="pnl-card pnl-share-canvas"
+                  aria-label={`Share card for $${symbol}`}
+                />
+                <div className="pnl-controls">
+                  <div className="pnl-setting">
+                    <span>Show in</span>
+                    <div className="seg pnl-unit">
+                      <button type="button" className={unit === "usd" ? "on" : ""} onClick={() => setUnit("usd")}>
+                        $
+                      </button>
+                      <button type="button" className={unit === "eth" ? "on" : ""} onClick={() => setUnit("eth")}>
+                        ETH
+                      </button>
+                    </div>
+                  </div>
+                  <div className="pnl-flags">
+                    {pnlFields.map(([key, label]) => (
+                      <button
+                        key={key}
+                        type="button"
+                        className={shown[key] ? "on" : ""}
+                        aria-pressed={shown[key]}
+                        onClick={() => setShown((current) => ({ ...current, [key]: !current[key] }))}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div className="position-share-actions">
+                  <button type="button" className="position-share-x" disabled={busy} onClick={shareTwitter}>
+                    Share on X
+                  </button>
+                  <button type="button" className="position-share-save" disabled={busy} onClick={saveImage}>
+                    Save image
+                  </button>
+                </div>
+                {note ? <p className="position-share-note">{note}</p> : null}
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
     </>
   );
+}
+
+function loadImage(src: string) {
+  return new Promise<HTMLImageElement>((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error(`Failed to load ${src}`));
+    image.src = src;
+  });
+}
+
+function downloadBlob(blob: Blob, name: string) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = name;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+type PnlSharePaint = {
+  scene: string;
+  symbol: string;
+  pnlLabel: string;
+  up: boolean;
+  valueLabel: string;
+  multipleLabel: string;
+  walletLabel: string;
+  entryLabel: string;
+  athLabel: string;
+  shown: Record<PnlField, boolean>;
+};
+
+async function paintPnlShareCard(input: PnlSharePaint, target?: HTMLCanvasElement) {
+  const [sceneImg, mark] = await Promise.all([loadImage(input.scene), loadImage("/logo-wordmark.png")]);
+  const width = 1920;
+  const height = 1080;
+  // Match CSS preview proportions (card ~388px wide in popup).
+  const s = width / 388;
+  const canvas = target ?? document.createElement("canvas");
+  const pixel = Math.max(2, Math.min(3, Math.round(window.devicePixelRatio || 2)));
+  canvas.width = width * pixel;
+  canvas.height = height * pixel;
+  if (target) {
+    canvas.style.width = "100%";
+    canvas.style.height = "auto";
+  }
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return null;
+  ctx.setTransform(pixel, 0, 0, pixel, 0, 0);
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
+
+  ctx.fillStyle = "#09090b";
+  ctx.fillRect(0, 0, width, height);
+
+  // object-fit: cover; object-position: left center
+  const cover = Math.max(width / sceneImg.naturalWidth, height / sceneImg.naturalHeight);
+  const drawW = sceneImg.naturalWidth * cover;
+  const drawH = sceneImg.naturalHeight * cover;
+  ctx.drawImage(sceneImg, 0, (height - drawH) / 2, drawW, drawH);
+
+  const fade = ctx.createLinearGradient(width * 0.06, 0, width * 0.82, 0);
+  fade.addColorStop(0, "rgba(9, 9, 11, 0)");
+  fade.addColorStop(0.22, "rgba(9, 9, 11, 0.08)");
+  fade.addColorStop(0.46, "rgba(9, 9, 11, 0.28)");
+  fade.addColorStop(0.68, "rgba(9, 9, 11, 0.58)");
+  fade.addColorStop(0.86, "rgba(9, 9, 11, 0.86)");
+  fade.addColorStop(1, "#09090b");
+  ctx.fillStyle = fade;
+  ctx.fillRect(0, 0, width, height);
+
+  const floorH = 36 * s;
+  const floor = ctx.createLinearGradient(0, height - floorH, 0, height);
+  floor.addColorStop(0, "rgba(9, 9, 11, 0)");
+  floor.addColorStop(0.62, "rgba(9, 9, 11, 0.78)");
+  floor.addColorStop(1, "#09090b");
+  ctx.fillStyle = floor;
+  ctx.fillRect(0, height - floorH, width, floorH);
+
+  const family = getComputedStyle(document.body).fontFamily || "system-ui, sans-serif";
+  const logoH = 12 * s;
+  const logoW = mark.naturalWidth > 0 ? (mark.naturalWidth / mark.naturalHeight) * logoH : 0;
+  if (logoW > 0) {
+    const padX = 8 * s;
+    const wrapH = 22 * s;
+    const boxW = logoW + padX * 2;
+    const boxX = 16 * s;
+    const boxY = 8 * s;
+    ctx.fillStyle = "rgba(9, 9, 11, 0.72)";
+    roundRectPath(ctx, boxX, boxY, boxW, wrapH, wrapH / 2);
+    ctx.fill();
+    ctx.drawImage(mark, boxX + padX, boxY + (wrapH - logoH) / 2, logoW, logoH);
+  }
+
+  const inset = 16 * s;
+  const right = width - inset;
+  const copyTop = 16 * s;
+  const copyBottom = 30 * s;
+  const lines: { text: string; size: number; weight: string; color: string; gap: number }[] = [];
+  if (input.shown.symbol) lines.push({ text: `$${input.symbol}`, size: 12 * s, weight: "600", color: "#fff", gap: 2 * s });
+  if (input.shown.pnl) {
+    lines.push({
+      text: input.pnlLabel,
+      size: 30 * s,
+      weight: "700",
+      color: input.up ? "#ccff00" : "#ff4d4d",
+      gap: 4 * s,
+    });
+  }
+  if (input.shown.value) lines.push({ text: input.valueLabel, size: 13 * s, weight: "600", color: "#fff", gap: 3 * s });
+  if (input.shown.multiple) lines.push({ text: input.multipleLabel, size: 12 * s, weight: "600", color: "#fff", gap: 0 });
+
+  const blockH = lines.reduce((sum, line, index) => sum + line.size + (index < lines.length - 1 ? line.gap : 0), 0);
+  const areaH = height - copyTop - copyBottom;
+  let y = copyTop + Math.max(0, (areaH - blockH) / 2);
+  ctx.textAlign = "right";
+  ctx.textBaseline = "top";
+  for (const line of lines) {
+    ctx.fillStyle = line.color;
+    ctx.font = `${line.weight} ${line.size}px ${family}`;
+    ctx.fillText(line.text, right, y);
+    y += line.size + line.gap;
+  }
+
+  if (input.shown.wallet || input.shown.entry || input.shown.ath) {
+    ctx.fillStyle = "#fff";
+    ctx.font = `300 ${8 * s}px ${family}`;
+    ctx.textBaseline = "bottom";
+    const footY = height - 12 * s;
+    if (input.shown.wallet) {
+      ctx.textAlign = "left";
+      ctx.fillText(input.walletLabel, inset, footY);
+    }
+    if (input.shown.entry) {
+      ctx.textAlign = "center";
+      ctx.fillText(input.entryLabel, width / 2, footY);
+    }
+    if (input.shown.ath) {
+      ctx.textAlign = "right";
+      ctx.fillText(input.athLabel, width - inset, footY);
+    }
+  }
+
+  if (target) return null;
+  return new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png"));
+}
+
+function roundRectPath(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {
+  const radius = Math.min(r, w / 2, h / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + radius, y);
+  ctx.arcTo(x + w, y, x + w, y + h, radius);
+  ctx.arcTo(x + w, y + h, x, y + h, radius);
+  ctx.arcTo(x, y + h, x, y, radius);
+  ctx.arcTo(x, y, x + w, y, radius);
+  ctx.closePath();
 }
 
 function socials(launch: Launch, meta?: { website?: string; twitter?: string; telegram?: string; discord?: string; farcaster?: string }) {
@@ -968,40 +1318,35 @@ function LinkGlyph({ label }: { label: string }) {
   );
 }
 
-function tradesFor(launch: Launch) {
-  if (launch.draft || launch.priceUsd <= 0 || launch.marketCap <= 0) return [];
-  const supply = launch.marketCap / launch.priceUsd;
-  const minutes = [2, 5, 9, 14, 22, 31, 44, 61, 80, 110, 150, 190, 240, 320, 410, 560];
-  return minutes.map((minute, index) => {
-    const side = index % 3 === 1 ? "Sell" : "Buy";
-    const amount = supply * (0.003 + index * 0.0014);
-    const wallet = index === 1 ? "0x4c91aa7700de12bb3318e774c0ff21aa" : `0x${(index * 7919 + 4096).toString(16).padStart(8, "0")}aa7700de12bb`;
-    return {
-      id: `${launch.symbol}-${index}`,
-      side,
-      address: wallet,
-      amount,
-      eth: (amount * launch.priceUsd) / 3500,
-      time: minute < 60 ? `${minute}m` : `${Math.round(minute / 60)}h`,
-    };
-  });
+function LockBadgeIcon() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden>
+      <rect x="5" y="10" width="14" height="11" rx="2.2" stroke="currentColor" strokeWidth="1.8" />
+      <path
+        d="M8 10V8.2A4 4 0 0 1 12 4a4 4 0 0 1 4 4.2V10"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+      />
+      <circle cx="12" cy="15" r="1.35" fill="currentColor" />
+    </svg>
+  );
 }
 
-function holdersFor(launch: Launch) {
-  if (launch.draft || launch.priceUsd <= 0 || launch.marketCap <= 0) return [];
-  const supply = launch.marketCap / launch.priceUsd;
-  const shares = [18.4, 11.2, 7.6, 5.1, 3.8, 2.9, 2.1, 1.4, 1.1, 0.92, 0.74, 0.61, 0.48, 0.39, 0.31, 0.24, 0.18, 0.12];
-  return shares.map((share, index) => {
-    const wallet = index === 0 ? launch.creator : index === 2 ? "0x4c91aa7700de12bb3318e774c0ff21aa" : `0x${(index * 6151 + 2048).toString(16).padStart(8, "0")}c0ff21aa7700`;
-    const entry = launch.priceUsd * (1 - ((index - 3) * launch.change1h) / 400);
-    return {
-      rank: index + 1,
-      address: wallet,
-      amount: (supply * share) / 100,
-      share,
-      entry: Math.max(entry, launch.priceUsd * 0.2),
-    };
-  });
+function DexscreenerBadgeIcon() {
+  return <img src="/dexscreener.png" alt="" width={16} height={16} className="token-badge-img" decoding="async" />;
+}
+
+function BoostBadgeIcon() {
+  // DexScreener Boost bolt (filled yellow lightning used on DS badges)
+  return (
+    <svg width="15" height="15" viewBox="0 0 24 24" aria-hidden>
+      <path
+        fill="currentColor"
+        d="M13.05 2.1 5.7 13.28c-.22.34.02.82.43.82h4.62l-1.1 7.66c-.08.55.6.9.97.5l8.05-11.18c.25-.35 0-.88-.43-.88h-4.9l1.28-7.6c.1-.55-.58-.92-.97-.5Z"
+      />
+    </svg>
+  );
 }
 
 function formatEth(value: number) {

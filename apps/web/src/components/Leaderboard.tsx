@@ -1,7 +1,10 @@
 "use client";
 
 import { useState } from "react";
-import { formatCount, leaderboard, shortAddress } from "@/lib/mock";
+import { getLeaderboard } from "@/lib/api";
+import { formatCount, shortAddress } from "@/lib/format";
+import type { LeaderboardRow } from "@/lib/types";
+import { useAsyncData } from "@/lib/use-async-data";
 import { Pager } from "./Pager";
 import { useWallet } from "./Wallet";
 import { WalletAvatar } from "./WalletAvatar";
@@ -20,6 +23,14 @@ const podium = {
   3: { label: "Bronze", tone: "bronze" },
 } as const;
 
+const emptyBoard = {
+  seasonId: null as string | null,
+  data: [] as LeaderboardRow[],
+  you: null as LeaderboardRow | null,
+  limit: 100,
+  offset: 0,
+};
+
 function Trophy({ place }: { place: 1 | 2 | 3 }) {
   return (
     <span className={`lb-trophy lb-trophy-${podium[place].tone}`}>
@@ -34,33 +45,31 @@ function Trophy({ place }: { place: 1 | 2 | 3 }) {
   );
 }
 
-const ranked = [
-  ...leaderboard,
-  ...Array.from({ length: 34 }, (_, index) => {
-    const n = index + 1;
-    const xp = Math.max(20, 140 - index * 3);
-    const tier = xp > 90 ? "Silver" : "Bronze";
-    const wallet = `0x${(BigInt(n) * 0x9e3779b97f4a7c15n).toString(16).padStart(40, "0").slice(-40)}`;
-    return {
-      wallet,
-      tier,
-      xp,
-      trades: Math.max(1, 12 - Math.floor(index / 4)),
-      rewards: "$0",
-    };
-  }),
-];
-
 export function Leaderboard() {
   const { connected, address } = useWallet();
   const [page, setPage] = useState(1);
-  const pages = Math.ceil(ranked.length / PAGE_SIZE);
-  const mineIndex = ranked.findIndex((row) => row.wallet.toLowerCase() === address.toLowerCase());
-  const mine = mineIndex >= 0 ? ranked[mineIndex] : null;
-  const mineRank = mineIndex + 1;
-  const minePage = Math.ceil(mineRank / PAGE_SIZE);
+  const { data: board, error, loading } = useAsyncData(
+    () => getLeaderboard({ limit: 100, wallet: connected ? address : undefined }),
+    [connected, address],
+    { initial: emptyBoard },
+  );
+  const ranked = board.data;
+  const you = board.you;
+  const pages = Math.max(1, Math.ceil(ranked.length / PAGE_SIZE));
+  const mineIndex = you
+    ? ranked.findIndex((row) => row.wallet.toLowerCase() === you.wallet.toLowerCase())
+    : -1;
+  const mineRank = mineIndex >= 0 ? mineIndex + 1 : null;
+  const minePage = mineRank != null ? Math.ceil(mineRank / PAGE_SIZE) : null;
   const start = (page - 1) * PAGE_SIZE;
   const visible = ranked.slice(start, start + PAGE_SIZE);
+  const statusNote = loading
+    ? "Loading leaderboard…"
+    : error
+      ? error
+      : ranked.length === 0
+        ? "No rankings yet."
+        : null;
 
   return (
     <div>
@@ -69,94 +78,117 @@ export function Leaderboard() {
           <h1 className="explore-title">Leaderboard</h1>
           <p className="page-note">Season XP. Wallets, not accounts.</p>
         </div>
-        {connected && mine ? null : <p className="page-note lb-you-empty">Connect a wallet to see its rank.</p>}
+        {connected && you ? null : (
+          <p className="page-note lb-you-empty">
+            {connected ? "Your wallet is not ranked this season." : "Connect a wallet to see its rank."}
+          </p>
+        )}
       </div>
-      {connected && mine ? (
-        <button type="button" className="sheet lb-you-card" onClick={() => setPage(minePage)}>
+      {connected && you ? (
+        <button
+          type="button"
+          className="sheet lb-you-card"
+          onClick={() => {
+            if (minePage != null) setPage(minePage);
+          }}
+        >
           <span className="lb-you-label">Your wallet</span>
           <span className="lb-you-main">
-            <span className="lb-you-rank">{mineRank <= 3 ? <Trophy place={mineRank as 1 | 2 | 3} /> : `#${mineRank}`}</span>
-            <WalletAvatar address={mine.wallet} />
+            <span className="lb-you-rank">
+              {mineRank != null && mineRank <= 3 ? (
+                <Trophy place={mineRank as 1 | 2 | 3} />
+              ) : mineRank != null ? (
+                `#${mineRank}`
+              ) : (
+                "—"
+              )}
+            </span>
+            <WalletAvatar address={you.wallet} />
             <span className="lb-you-id">
-              <strong>{shortAddress(mine.wallet)}</strong>
-              <span style={{ color: tierColor[mine.tier] }}>{mine.tier}</span>
+              <strong>{shortAddress(you.wallet)}</strong>
+              <span style={{ color: tierColor[you.tier] }}>{you.tier}</span>
             </span>
           </span>
           <span className="lb-you-stats">
-            <strong>{formatCount(mine.xp)} XP</strong>
+            <strong>{formatCount(you.xp)} XP</strong>
             <span>
-              {mine.trades} trades · {mine.rewards}
+              {you.trades} trades · {you.rewards}
             </span>
           </span>
         </button>
       ) : null}
-      <div className="table-wrap">
-        <table className="coin-table lb-table">
-          <thead>
-            <tr>
-              <th>Rank</th>
-              <th>Wallet</th>
-              <th>Tier</th>
-              <th>Season XP</th>
-              <th>Trades</th>
-              <th>Rewards</th>
-            </tr>
-          </thead>
-          <tbody>
+      {statusNote ? <p className="page-note">{statusNote}</p> : null}
+      {!loading && !error && ranked.length > 0 ? (
+        <>
+          <div className="table-wrap">
+            <table className="coin-table lb-table">
+              <thead>
+                <tr>
+                  <th>Rank</th>
+                  <th>Wallet</th>
+                  <th>Tier</th>
+                  <th>Season XP</th>
+                  <th>Trades</th>
+                  <th>Rewards</th>
+                </tr>
+              </thead>
+              <tbody>
+                {visible.map((row, index) => {
+                  const rank = start + index + 1;
+                  const place = rank as 1 | 2 | 3;
+                  const medal = rank <= 3 ? podium[place] : null;
+                  const yours = connected && row.wallet.toLowerCase() === address.toLowerCase();
+                  return (
+                    <tr
+                      key={row.wallet}
+                      className={[medal ? `lb-row lb-row-${medal.tone}` : "", yours ? "lb-you" : ""].filter(Boolean).join(" ") || undefined}
+                    >
+                      <td>{medal ? <Trophy place={place} /> : rank}</td>
+                      <td className="text-left font-semibold">
+                        <span className="lb-wallet">
+                          <WalletAvatar address={row.wallet} />
+                          {shortAddress(row.wallet)}
+                          {yours ? <em className="lb-you-tag">You</em> : null}
+                        </span>
+                      </td>
+                      <td style={{ color: tierColor[row.tier] }}>{row.tier}</td>
+                      <td className="up">{formatCount(row.xp)}</td>
+                      <td>{row.trades}</td>
+                      <td>{row.rewards}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          <ul className="app-rows">
             {visible.map((row, index) => {
               const rank = start + index + 1;
               const place = rank as 1 | 2 | 3;
               const medal = rank <= 3 ? podium[place] : null;
               const yours = connected && row.wallet.toLowerCase() === address.toLowerCase();
               return (
-                <tr
-                  key={row.wallet}
-                  className={[medal ? `lb-row lb-row-${medal.tone}` : "", yours ? "lb-you" : ""].filter(Boolean).join(" ") || undefined}
-                >
-                  <td>{medal ? <Trophy place={place} /> : rank}</td>
-                  <td className="text-left font-semibold">
-                    <span className="lb-wallet">
-                      <WalletAvatar address={row.wallet} />
+                <li key={row.wallet} className={[medal ? `is-${medal.tone}` : "", yours ? "is-you" : ""].filter(Boolean).join(" ") || undefined}>
+                  <span className="app-rank">{medal ? <Trophy place={place} /> : rank}</span>
+                  <WalletAvatar address={row.wallet} />
+                  <div>
+                    <strong>
                       {shortAddress(row.wallet)}
                       {yours ? <em className="lb-you-tag">You</em> : null}
-                    </span>
-                  </td>
-                  <td style={{ color: tierColor[row.tier] }}>{row.tier}</td>
-                  <td className="up">{formatCount(row.xp)}</td>
-                  <td>{row.trades}</td>
-                  <td>{row.rewards}</td>
-                </tr>
+                    </strong>
+                    <span style={{ color: tierColor[row.tier] }}>{row.tier}</span>
+                  </div>
+                  <b>
+                    {formatCount(row.xp)} XP
+                    <span>{row.trades} trades</span>
+                  </b>
+                </li>
               );
             })}
-          </tbody>
-        </table>
-      </div>
-      <ul className="app-rows">
-        {visible.map((row, index) => {
-          const rank = start + index + 1;
-          const place = rank as 1 | 2 | 3;
-          const medal = rank <= 3 ? podium[place] : null;
-          const yours = connected && row.wallet.toLowerCase() === address.toLowerCase();
-          return (
-            <li key={row.wallet} className={[medal ? `is-${medal.tone}` : "", yours ? "is-you" : ""].filter(Boolean).join(" ") || undefined}>
-              <span className="app-rank">{medal ? <Trophy place={place} /> : rank}</span>
-              <WalletAvatar address={row.wallet} />
-              <div>
-                <strong>
-                  {shortAddress(row.wallet)}
-                  {yours ? <em className="lb-you-tag">You</em> : null}
-                </strong>
-                <span style={{ color: tierColor[row.tier] }}>{row.tier}</span>
-              </div>
-              <b>
-                {formatCount(row.xp)} XP
-                <span>{row.trades} trades</span>
-              </b>
-            </li>
-          );
-        })}
-      </ul>
-      {pages > 1 ? <Pager page={page} pages={pages} onChange={setPage} /> : null}
+          </ul>
+          {pages > 1 ? <Pager page={page} pages={pages} onChange={setPage} /> : null}
+        </>
+      ) : null}
     </div>
   );
 }
