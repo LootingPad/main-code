@@ -1,5 +1,7 @@
 # LOOTING — Product & Technical Specification.
 
+#add test
+
 > **Status:** Product Architecture Draft v1.1  
 > **Primary chain:** Robinhood Chain  
 > **Launch engine:** Pons V2 Factory (external dependency; no partnership assumed)  
