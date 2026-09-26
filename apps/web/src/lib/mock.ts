@@ -211,6 +211,146 @@ export const launches: Launch[] = [
     creatorTax: 1,
     phase: "curve",
   },
+  {
+    address: "0xa1b2c3d4e5f678901234567890abcdef12345601",
+    name: "Copper Gate",
+    symbol: "GATE",
+    description: "Early curve with a thin book.",
+    creator: "0x4c91aa7700de12bb3318e774c0ff21aa",
+    marketCap: 7200,
+    progress: 12,
+    change1h: 8.4,
+    priceUsd: 0.000007,
+    luckyShare: 20,
+    creatorTax: 1,
+    phase: "curve",
+  },
+  {
+    address: "0xa1b2c3d4e5f678901234567890abcdef12345602",
+    name: "Amber Drift",
+    symbol: "AMBER",
+    description: "Fresh pair still opening.",
+    creator: "0x19bb221100de44a90112ab90ff33c1",
+    marketCap: 9800,
+    progress: 16,
+    change1h: -1.8,
+    priceUsd: 0.00001,
+    luckyShare: 25,
+    creatorTax: 1,
+    phase: "curve",
+  },
+  {
+    address: "0xa1b2c3d4e5f678901234567890abcdef12345603",
+    name: "Ivory Coil",
+    symbol: "COIL",
+    description: "Low float curve with steady buyers.",
+    creator: "0x7712bb09331100aa77c144c01aa98e",
+    marketCap: 13400,
+    progress: 22,
+    change1h: 11.2,
+    priceUsd: 0.000013,
+    luckyShare: 30,
+    creatorTax: 1,
+    phase: "curve",
+  },
+  {
+    address: "0xa1b2c3d4e5f678901234567890abcdef12345604",
+    name: "Pulse Oak",
+    symbol: "OAK",
+    description: "New listing. Volume is light.",
+    creator: "0x00117b6Daa10AfBe91c02d4418c77e",
+    marketCap: 5600,
+    progress: 7,
+    change1h: 4.1,
+    priceUsd: 0.000006,
+    luckyShare: 15,
+    creatorTax: 1,
+    phase: "curve",
+  },
+  {
+    address: "0xa1b2c3d4e5f678901234567890abcdef12345605",
+    name: "Silver Fern",
+    symbol: "FERN",
+    description: "Early curve under half fill.",
+    creator: "0x4c91aa7700de12bb3318e774c0ff21aa",
+    marketCap: 18700,
+    progress: 29,
+    change1h: -5.6,
+    priceUsd: 0.000019,
+    luckyShare: 20,
+    creatorTax: 1,
+    phase: "curve",
+  },
+  {
+    address: "0xa1b2c3d4e5f678901234567890abcdef12345606",
+    name: "Nova Quill",
+    symbol: "QUILL",
+    description: "Just opened. Buyers still arriving.",
+    creator: "0x19bb221100de44a90112ab90ff33c1",
+    marketCap: 8100,
+    progress: 13,
+    change1h: 22.0,
+    priceUsd: 0.000008,
+    luckyShare: 40,
+    creatorTax: 1,
+    phase: "curve",
+  },
+  {
+    address: "0xa1b2c3d4e5f678901234567890abcdef12345607",
+    name: "Rust Harbor",
+    symbol: "RUST",
+    description: "Mid-open curve with quiet flow.",
+    creator: "0x7712bb09331100aa77c144c01aa98e",
+    marketCap: 22100,
+    progress: 35,
+    change1h: 1.4,
+    priceUsd: 0.000022,
+    luckyShare: 20,
+    creatorTax: 1,
+    phase: "curve",
+  },
+  {
+    address: "0xa1b2c3d4e5f678901234567890abcdef12345608",
+    name: "Cold Spark",
+    symbol: "SPARK",
+    description: "Thin liquidity. Early entries only.",
+    creator: "0x00117b6Daa10AfBe91c02d4418c77e",
+    marketCap: 4300,
+    progress: 5,
+    change1h: 9.7,
+    priceUsd: 0.000004,
+    luckyShare: 25,
+    creatorTax: 1,
+    phase: "curve",
+  },
+  {
+    address: "0xa1b2c3d4e5f678901234567890abcdef12345609",
+    name: "Lime Atlas",
+    symbol: "ATLAS",
+    description: "Climbing the first quarter of the curve.",
+    creator: "0x4c91aa7700de12bb3318e774c0ff21aa",
+    marketCap: 27600,
+    progress: 42,
+    change1h: -3.3,
+    priceUsd: 0.000028,
+    luckyShare: 20,
+    creatorTax: 1,
+    phase: "curve",
+  },
+  {
+    address: "0xa1b2c3d4e5f678901234567890abcdef1234560a",
+    name: "Dust Relay",
+    symbol: "RELAY",
+    description: "New pair with a wide Lucky Box cut.",
+    creator: "0x19bb221100de44a90112ab90ff33c1",
+    marketCap: 11900,
+    progress: 20,
+    change1h: 6.8,
+    priceUsd: 0.000012,
+    luckyShare: 45,
+    creatorTax: 1,
+    phase: "curve",
+  },
 ];
 
 export const stagedLaunches: Launch[] = [
@@ -321,9 +461,15 @@ export function formatCount(value: number) {
 }
 
 export function formatUsd(value: number) {
-  if (value >= 1_000_000) return `$${(value / 1_000_000).toFixed(2)}M`;
-  if (value >= 1_000) return `$${(value / 1_000).toFixed(1)}k`;
-  return `$${value.toFixed(2)}`;
+  const raw = Number.isFinite(value) ? value : 0;
+  const amount = Math.abs(raw);
+  const sign = raw < 0 ? "-" : "";
+  // Keep suffix length stable so live ticks don't shove table columns sideways.
+  if (amount >= 1_000_000_000_000) return `${sign}$${(amount / 1_000_000_000_000).toFixed(2)}T`;
+  if (amount >= 1_000_000_000) return `${sign}$${(amount / 1_000_000_000).toFixed(2)}B`;
+  if (amount >= 1_000_000) return `${sign}$${(amount / 1_000_000).toFixed(2)}M`;
+  if (amount >= 1_000) return `${sign}$${(amount / 1_000).toFixed(1)}k`;
+  return `${sign}$${amount.toFixed(2)}`;
 }
 
 export function formatPrice(value: number) {
@@ -358,14 +504,21 @@ const demoHistory: {
   tx?: string;
   claimedAt?: string;
 }[] = [
-  { id: "08", token: "LANTERN", bought: true, exited: true },
-  { id: "07", token: "RAIL", bought: true, exited: true },
-  { id: "06", token: "VAULT", bought: true, exited: false },
-  { id: "05", token: "THREAD", bought: true, exited: false },
-  { id: "03", token: "HARBOR", bought: true, exited: true, reward: "0.42 mSPY", tx: "0x8f3a21bb90de44a90112ab90ff33c1d8e774aa01", claimedAt: "2h" },
-  { id: "01", token: "QUIET", bought: true, exited: true },
-  { id: "04", token: "KEY", bought: false, exited: false },
-  { id: "02", token: "DOCK", bought: false, exited: false },
+  { id: "15", token: "LANTERN", bought: true, exited: true },
+  { id: "14", token: "RAIL", bought: true, exited: true },
+  { id: "13", token: "VAULT", bought: true, exited: false },
+  { id: "12", token: "THREAD", bought: true, exited: false },
+  { id: "11", token: "HARBOR", bought: true, exited: true, reward: "0.42 mSPY", tx: "0x8f3a21bb90de44a90112ab90ff33c1d8e774aa01", claimedAt: "2h" },
+  { id: "10", token: "QUIET", bought: true, exited: true },
+  { id: "09", token: "KEY", bought: true, exited: true },
+  { id: "08", token: "DOCK", bought: true, exited: false },
+  { id: "07", token: "LANTERN", bought: true, exited: true, reward: "25 LOOTING", tx: "0x8f3a21bb90de44a90112ab90ff33c1d8e774aa07", claimedAt: "1d" },
+  { id: "06", token: "RAIL", bought: true, exited: true },
+  { id: "05", token: "VAULT", bought: true, exited: true },
+  { id: "04", token: "THREAD", bought: true, exited: false },
+  { id: "03", token: "HARBOR", bought: true, exited: true },
+  { id: "02", token: "KEY", bought: false, exited: false },
+  { id: "01", token: "DOCK", bought: false, exited: false },
 ];
 
 function historyStatus(row: (typeof demoHistory)[number]): BoxStatus {

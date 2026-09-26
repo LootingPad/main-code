@@ -856,22 +856,27 @@ Must never allow arbitrary calldata target injection.
 Recommended factory create signature (conceptual):
 
 ```solidity
+uint256 public constant CREATE_FEE_ETH = 0.0019 ether; // flat create fee shown in UI
+
 function createVault(
     address stakeToken,
     uint256 rewardAmount,
     uint64 endsAt,
     uint8 lockMask,          // bit0=flex, bit1=30d, bit2=90d
     uint16[3] calldata aprBps // APR in bps for flex/30/90; 0 if disabled
-) external returns (address vault, uint256 vaultId);
+) external payable returns (address vault, uint256 vaultId);
 ```
 
 `createVault` must:
 
 1. require `stakeToken` is a registered LOOTING launch
-2. pull `rewardAmount` from `msg.sender` into the new vault
-3. require `endsAt > block.timestamp`
-4. require at least one lock enabled
-5. emit `StakingVaultCreated`
+2. collect flat **0.0019 ETH create fee** (UI label: Create fee) — require `msg.value >= CREATE_FEE_ETH`; forward fee ETH to the protocol fee recipient; refund any overpay
+3. pull `rewardAmount` of `stakeToken` from `msg.sender` into the new vault
+4. require `endsAt > block.timestamp`
+5. require at least one lock enabled
+6. emit `StakingVaultCreated` (include `feePaid = msg.value` or exact `CREATE_FEE_ETH` after refund)
+
+The create fee is protocol revenue and is **not** part of the vault reward pool.
 
 Vault user entrypoints (match Staking → Positions UI):
 
@@ -944,18 +949,26 @@ struct DevLockPosition {
 Entrypoints:
 
 ```solidity
-function createTimeLock(address token, uint256 amount, uint64 unlockAt) external returns (uint256 lockId);
+uint256 public constant LOCK_FEE = 0.0005 ether; // flat Fee Lock (UI label)
+
+function createTimeLock(address token, uint256 amount, uint64 unlockAt) external payable returns (uint256 lockId);
 function createVesting(
     address token,
     uint256 amount,
     uint64 cliffAt,
     uint64 unlockAt,
     DevLockCadence cadence
-) external returns (uint256 lockId);
+) external payable returns (uint256 lockId);
 function claim(uint256 lockId) external returns (uint256 paid);
 function vestedAmount(uint256 lockId) external view returns (uint256);
 function claimableAmount(uint256 lockId) external view returns (uint256);
 ```
+
+Create rules:
+
+- `msg.value == LOCK_FEE` (exactly **0.0005 ETH** flat Fee Lock) or the tx reverts
+- Fee is protocol revenue (treasury / fee recipient configured at deploy); it is **not** refunded on claim
+- Token `amount` is pulled via transferFrom as before
 
 Claim math (must match UI):
 
@@ -1950,6 +1963,7 @@ event StakingVaultCreated(
     address indexed stakeToken,
     address creator,
     uint256 rewardAmount,
+    uint256 feePaid,
     uint64 endsAt,
     uint8 lockMask
 );
@@ -1965,7 +1979,8 @@ event DevLockCreated(
     uint8 mode,
     uint256 amount,
     uint64 cliff,
-    uint64 unlock
+    uint64 unlock,
+    uint256 feePaid
 );
 event DevLockClaimed(uint256 indexed lockId, address indexed owner, uint256 amount);
 ```
@@ -1988,6 +2003,7 @@ These events should make the system reconstructable from chain data. Indexer + f
 - swap safety
 - Dev Lock vested/claimable math (time + vest + cliff)
 - Dev Lock early-claim reverts; post-unlock full claim
+- Dev Lock create reverts unless msg.value == 0.0005 ether
 - staking vault create pulls rewards and registers vault id
 - stake / unstake lock-duration enforcement (flex vs 30 vs 90)
 - staking reward accrual + rewardRemaining cap
@@ -2769,21 +2785,33 @@ Creators lock or vest supply of coins they launched to signal that tokens are co
 
 - User selects a coin (typically from launches they created) and an amount from wallet balance
 - Lock schedule is visible after creation
+- Creating a lock charges a flat **Fee Lock of 0.0005 ETH** (shown in the form preview under Release / Each slice)
 - Unlocked / vested amounts are **Claim**ed back to the wallet (product label is Claim, not Release)
 - Early withdrawal of locked / unvested tokens is not allowed
+- Fee Lock is paid once at create; it is not refunded when claiming unlocked tokens
+
+### Preview rows (form)
+
+```text
+You lock      <amount> <SYMBOL>
+Unlocks       <date>          (or Fully vested)
+Release       All at once     (or Each slice …)
+Fee Lock      0.0005 ETH
+```
 
 ### Share card
 
-Each lock row has a **Share** action. Sharing opens a branded share card (canvas OG image) with:
+Each lock row has a **Share** action. Sharing opens a branded share card (canvas OG image) using `/lockcard.png` as the art background, with:
 
 - token symbol
 - lock mode (Time-based / Vesting)
 - locked amount
 - status line (unlock date or vesting progress)
+- Fee Lock (0.0005 ETH)
 - unlock progress bar
 - LOOTING branding / lootingpad.com footer
 
-The user can share via the system share sheet or download the PNG. This mirrors Lucky Box share-card UX but is scoped to Dev Lock positions.
+The user can share via the system share sheet or download the PNG. Share-card rendering is frontend-only.
 
 ### On-chain mapping
 
@@ -2886,13 +2914,25 @@ Publish a **new staking vault** for any LOOTING-launched coin. The vault creator
 ### Product rules
 
 - One create = one new vault (distinct accounting from other vaults)
+- Creating a vault charges a flat **Create fee of 0.0019 ETH** (shown in the form preview)
+- Create fee is protocol revenue; it is separate from the reward pool and is not refunded
+- Fee is collected as `msg.value >= 0.0019 ETH`
 - Reward liability is capped by the funded pool for that vault
 - Enabled locks and end date are snapshotted at create time
 - Published vaults are publicly stakeable until the event ends (or is paused by emergency controls)
 
+### Preview rows (form)
+
+```text
+Reward pool   <amount> <SYMBOL>
+Ends          <date>
+Locks         Flexible 8% · 30 days 14% · …
+Create fee    0.0019 ETH
+```
+
 ### On-chain mapping
 
-`createVault` on `LootingStakingFactory` — one successful create = one new vault address + `vaultId` (§61.3).
+`createVault` on `LootingStakingFactory` — one successful create = one new vault address + `vaultId` (§61.3). Wallet sends `msg.value >= 0.0019 ETH`.
 
 ### UX surface
 
@@ -2911,8 +2951,9 @@ Season-level dashboard for the protocol — **not** a single-wallet page (that i
 
 - Volume, launch count, traders (24h / all-time toggle)
 - Creator-fee vs Lucky Box funding split with top launches
-- Aggregate staking across public vaults (by lock length where available)
-- Daily charts: volume, new launches, staking (histogram with hover/focus values)
+- **Staking vaults** — open vault count, aggregate staked, reward pools funded via Create Staking, breakdown by lock (Flexible / 30 / 90), top vaults by TVL and by reward size, staker count, avg APR
+- **Dev Lock** — active locks, tokens still locked vs claimed, Time-based vs Vesting split, Fee Lock ETH collected (0.0005 ETH × creates), top locked tokens, creators locking
+- Daily charts: volume, launches, staking vaults inflow, Dev Lock inflow
 
 ### UX surface
 
@@ -3042,18 +3083,21 @@ This section is the checklist for implementing and deploying smart contracts so 
 
 When a user completes Create Staking in the UI:
 
-1. Wallet approves `rewardAmount` of `stakeToken` to the factory (or vault)
-2. `createVault` succeeds and returns `(vault, vaultId)`
-3. `StakingVaultCreated` is emitted
-4. Staking → Events shows the new row after indexer/API refresh
-5. Another wallet can `stake` into that vault from Positions
-6. Reward payouts never exceed the funded `rewardAmount`
+1. Wallet pays flat **0.0019 ETH create fee** (`msg.value >= 0.0019 ether`)
+2. Wallet approves `rewardAmount` of `stakeToken` to the factory (or vault)
+3. `createVault` succeeds and returns `(vault, vaultId)`
+4. `StakingVaultCreated` is emitted with fee metadata
+5. Staking → Events shows the new row after indexer/API refresh
+6. Another wallet can `stake` into that vault from Positions
+7. Reward payouts never exceed the funded `rewardAmount`
+8. Create fee is not credited to the vault reward pool
 
 Failure cases the UI must surface:
 
 - token not a LOOTING launch
 - reward amount 0 / endsAt in the past / no locks enabled
-- insufficient allowance or balance
+- insufficient allowance or balance for reward token
+- create fee not paid / insufficient ETH (`msg.value < 0.0019 ether`)
 
 ### 61.4 Staking Positions (acceptance)
 
@@ -3079,15 +3123,23 @@ APR values are set per vault at create time (UI may show presets). They are not 
 
 Create Time-based:
 
+- require `msg.value == 0.0005 ether` (Fee Lock)
 - pull `amount` of creator’s token
 - store unlock timestamp
 - `claimable = 0` until unlock; then full remainder
 
 Create Vesting:
 
+- require `msg.value == 0.0005 ether` (Fee Lock)
 - pull `amount`
 - store `cliff`, `unlock`, cadence metadata
 - claimable follows linear formula in §16
+
+Fee Lock:
+
+- flat **0.0005 ETH** per create (time or vesting)
+- shown in UI preview as **Fee Lock**
+- sent to protocol fee recipient; not returned on claim
 
 Claim:
 
@@ -3140,11 +3192,13 @@ dev_locks
 ### 61.9 Definition of done for vault + Dev Lock deploy
 
 - [ ] Factory creates a distinct vault per Create Staking tx
+- [ ] Create Staking requires flat 0.0019 ETH create fee (not mixed into reward pool)
 - [ ] Events tab can list all vaults from chain/indexer
 - [ ] Positions can stake / unstake / claim against a selected vault + lock
 - [ ] Flexible / 30 / 90 lock rules enforced on-chain
 - [ ] Vault reward paid ≤ reward funded
 - [ ] Dev Lock time + vesting claim math matches UI formula
+- [ ] Dev Lock create requires exactly 0.0005 ETH Fee Lock
 - [ ] Non-creators cannot Dev-Lock someone else’s launch token
 - [ ] Pause stops new vault creates and new stakes
 - [ ] All actions emit §35 events

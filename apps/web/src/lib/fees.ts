@@ -1,5 +1,11 @@
 import type { Launch } from "./mock";
 
+/** Flat ETH fee charged when creating a Dev Lock (time or vesting). */
+export const DEV_LOCK_FEE_ETH = 0.0005;
+
+/** Flat ETH fee charged when creating a staking vault event. */
+export const CREATE_STAKING_FEE_ETH = 0.0019;
+
 /** Fixed split of accrued creator tax. */
 export const CREATOR_FEE_SHARE = 0.8;
 export const PROTOCOL_BURN_SHARE = 0.2;

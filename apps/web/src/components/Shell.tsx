@@ -1,12 +1,25 @@
 "use client";
 
+import dynamic from "next/dynamic";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { FormEvent, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { formatUsd, launches, marketStats, shortAddress } from "@/lib/mock";
+import { FormEvent, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { formatUsd, launches, shortAddress } from "@/lib/mock";
 import { BookIcon, NavIcon, PanelIcon, PlusIcon, SearchIcon, TelegramIcon, XIcon } from "./Icons";
+import { RouteTransition } from "./RouteTransition";
 import { TokenLogo } from "./TokenLogo";
 import { useWallet } from "./Wallet";
+
+type SearchCategory = "all" | "token" | "staking";
+type SearchSortBy = "relevance" | "mcap" | "volume" | "newest" | "oldest";
+type SearchAge = "all" | "24h" | "7d";
+type SearchPhase = "all" | "curve" | "graduated";
+type SearchMenu = "sort" | "age" | "phase" | null;
+
+const ShellSearchModal = dynamic(
+  () => import("./ShellSearchModal").then((mod) => ({ default: mod.ShellSearchModal })),
+  { ssr: false },
+);
 
 const links = [
   { href: "/", label: "Explore" },
@@ -40,14 +53,6 @@ const sideLinks = [
   { href: "https://t.me/lootingpad", label: "Telegram", icon: <TelegramIcon size={20} />, external: true },
 ];
 
-function ageHours(age: string) {
-  const value = Number.parseFloat(age);
-  if (age.endsWith("m")) return value / 60;
-  if (age.endsWith("h")) return value;
-  if (age.endsWith("d")) return value * 24;
-  return 999;
-}
-
 function creatorFeeEth(launch: (typeof launches)[number]) {
   const accrued = (launch.marketCap / 3500) * (launch.creatorTax / 100) * (0.35 + launch.progress / 200);
   return (accrued * (100 - launch.luckyShare)) / 100;
@@ -76,10 +81,12 @@ export function Shell({ children }: { children: React.ReactNode }) {
   const dialogRef = useRef<HTMLInputElement>(null);
   const closeTimer = useRef<number | null>(null);
   const searchGen = useRef(0);
-  const [sortBy, setSortBy] = useState<"relevance" | "mcap" | "volume" | "newest" | "oldest">("relevance");
-  const [age, setAge] = useState<"all" | "24h" | "7d">("all");
-  const [phase, setPhase] = useState<"all" | "curve" | "graduated">("all");
+  const [sortBy, setSortBy] = useState<SearchSortBy>("relevance");
+  const [age, setAge] = useState<SearchAge>("all");
+  const [phase, setPhase] = useState<SearchPhase>("all");
+  const [category, setCategory] = useState<SearchCategory>("all");
   const [page, setPage] = useState(0);
+  const [menuOpen, setMenuOpen] = useState<SearchMenu>(null);
   const [pill, setPill] = useState({ y: 0, h: 36, show: false });
 
   useEffect(() => {
@@ -105,23 +112,13 @@ export function Shell({ children }: { children: React.ReactNode }) {
     });
   }
 
-  useEffect(() => {
-    function onKey(event: KeyboardEvent) {
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
-        event.preventDefault();
-        openSearch();
-      }
-      if (event.key === "Escape") closeSearch();
-    }
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+  const closeSearch = useCallback(() => {
+    searchGen.current += 1;
+    setSearchVisible(false);
+    setMenuOpen(null);
+    if (closeTimer.current) window.clearTimeout(closeTimer.current);
+    closeTimer.current = window.setTimeout(() => setSearchMounted(false), 240);
   }, []);
-
-  useEffect(() => {
-    if (!searchVisible) return;
-    const frame = window.requestAnimationFrame(() => dialogRef.current?.focus());
-    return () => window.cancelAnimationFrame(frame);
-  }, [searchVisible]);
 
   function openSearch() {
     if (closeTimer.current) {
@@ -138,12 +135,22 @@ export function Shell({ children }: { children: React.ReactNode }) {
     });
   }
 
-  function closeSearch() {
-    searchGen.current += 1;
-    setSearchVisible(false);
-    if (closeTimer.current) window.clearTimeout(closeTimer.current);
-    closeTimer.current = window.setTimeout(() => setSearchMounted(false), 240);
-  }
+  useEffect(() => {
+    function onKey(event: KeyboardEvent) {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        openSearch();
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  useEffect(() => {
+    if (!searchVisible) return;
+    const frame = window.requestAnimationFrame(() => dialogRef.current?.focus());
+    return () => window.cancelAnimationFrame(frame);
+  }, [searchVisible]);
 
   function search(event: FormEvent) {
     event.preventDefault();
@@ -151,33 +158,6 @@ export function Shell({ children }: { children: React.ReactNode }) {
     closeSearch();
     router.push(term ? `/?q=${encodeURIComponent(term)}` : "/");
   }
-
-  const needle = query.trim().toLowerCase();
-  const coinHits = launches
-    .map((coin) => ({ coin, stats: marketStats(coin) }))
-    .filter(({ coin, stats }) => {
-      const hours = ageHours(stats.age);
-      if (age === "24h" && hours > 24) return false;
-      if (age === "7d" && hours > 24 * 7) return false;
-      if (phase !== "all" && coin.phase !== phase) return false;
-      if (!needle) return true;
-      return (
-        coin.name.toLowerCase().includes(needle) ||
-        coin.symbol.toLowerCase().includes(needle) ||
-        coin.address.toLowerCase().includes(needle)
-      );
-    })
-    .sort((a, b) => {
-      if (sortBy === "mcap") return b.coin.marketCap - a.coin.marketCap;
-      if (sortBy === "volume") return b.stats.volume24h - a.stats.volume24h;
-      if (sortBy === "newest") return ageHours(a.stats.age) - ageHours(b.stats.age);
-      if (sortBy === "oldest") return ageHours(b.stats.age) - ageHours(a.stats.age);
-      return 0;
-    });
-  const pageSize = 8;
-  const pageCount = Math.max(1, Math.ceil(coinHits.length / pageSize));
-  const safePage = Math.min(page, pageCount - 1);
-  const pageHits = coinHits.slice(safePage * pageSize, safePage * pageSize + pageSize);
 
   const tape = [...launches, ...launches];
 
@@ -188,8 +168,8 @@ export function Shell({ children }: { children: React.ReactNode }) {
         <aside className="sidebar">
         <div className="brand-row">
           <Link href="/" className="brand" title="LOOTING" aria-label="LOOTING">
-            <img src="/logo.png" alt="" className="brand-logo" />
-            <img src="/logo-wordmark.png" alt="" className="brand-word" />
+            <img src="/logo.png" alt="" className="brand-logo" fetchPriority="high" decoding="async" />
+            <img src="/logo-wordmark.png" alt="" className="brand-word" fetchPriority="high" decoding="async" />
           </Link>
         </div>
         {connected ? <CreatorClaim address={address} claimed={creatorClaimed} onClaim={() => setCreatorClaimed(true)} /> : null}
@@ -295,15 +275,15 @@ export function Shell({ children }: { children: React.ReactNode }) {
             >
               <SearchIcon />
               <input
-                value={query}
+                value={typeof query === "string" ? query : ""}
                 onChange={(event) => {
                   setQuery(event.target.value);
                   setPage(0);
                   openSearch();
                 }}
                 onFocus={openSearch}
-                placeholder="Search for coins and wallets..."
-                aria-label="Search for coins and wallets"
+                placeholder="Search tokens or staking pools..."
+                aria-label="Search tokens or staking pools"
                 aria-expanded={searchVisible}
               />
               <span className="search-keys" aria-hidden>
@@ -341,7 +321,9 @@ export function Shell({ children }: { children: React.ReactNode }) {
             </button>
           </div>
         </header>
-        <main className="content">{children}</main>
+        <main className="content">
+          <RouteTransition>{children}</RouteTransition>
+        </main>
       </div>
       <nav className="tabbar">
         {[...links, { href: "/account", label: "Account" }].map((link) => (
@@ -352,123 +334,26 @@ export function Shell({ children }: { children: React.ReactNode }) {
         ))}
       </nav>
       {searchMounted ? (
-        <div className={`search-modal-root ${searchVisible ? "is-open" : ""}`} onMouseDown={closeSearch}>
-          <div
-            className="search-modal"
-            role="dialog"
-            aria-modal="true"
-            aria-label="Search"
-            onMouseDown={(event) => event.stopPropagation()}
-          >
-            <form className="search-modal-field" onSubmit={search}>
-              <SearchIcon />
-              <input
-                ref={dialogRef}
-                value={query}
-                onChange={(event) => {
-                  setQuery(event.target.value);
-                  setPage(0);
-                }}
-                placeholder="Search name, ticker, or address"
-                aria-label="Search name, ticker, or address"
-              />
-              <button type="button" className="search-modal-close" aria-label="Close" onClick={closeSearch}>
-                ×
-              </button>
-            </form>
-            <div className="search-filters">
-              <div className="search-filter-row">
-                <span>Sort by</span>
-                {(["relevance", "mcap", "volume", "newest", "oldest"] as const).map((id) => (
-                  <button
-                    key={id}
-                    type="button"
-                    className={sortBy === id ? "on" : ""}
-                    onClick={() => {
-                      setSortBy(id);
-                      setPage(0);
-                    }}
-                  >
-                    {id === "mcap" ? "Market cap" : id === "relevance" ? "Relevance" : id[0].toUpperCase() + id.slice(1)}
-                  </button>
-                ))}
-              </div>
-              <div className="search-filter-row">
-                <span>Age</span>
-                {(["all", "24h", "7d"] as const).map((id) => (
-                  <button
-                    key={id}
-                    type="button"
-                    className={age === id ? "on" : ""}
-                    onClick={() => {
-                      setAge(id);
-                      setPage(0);
-                    }}
-                  >
-                    {id === "all" ? "All" : id}
-                  </button>
-                ))}
-              </div>
-              <div className="search-filter-row">
-                <span>Phase</span>
-                {(["all", "curve", "graduated"] as const).map((id) => (
-                  <button
-                    key={id}
-                    type="button"
-                    className={phase === id ? "on" : ""}
-                    onClick={() => {
-                      setPhase(id);
-                      setPage(0);
-                    }}
-                  >
-                    {id === "all" ? "All" : id === "curve" ? "Curve" : "Graduated"}
-                  </button>
-                ))}
-              </div>
-            </div>
-            <div className="search-modal-list">
-              {pageHits.length === 0 ? (
-                <p className="search-empty">No coins match that search.</p>
-              ) : (
-                pageHits.map(({ coin, stats }) => (
-                  <Link
-                    key={coin.address}
-                    href={`/token/${coin.address}`}
-                    className="search-hit"
-                    onClick={closeSearch}
-                  >
-                    <TokenLogo symbol={coin.symbol} size={32} />
-                    <span>
-                      <b>{coin.name}</b>
-                      <em>
-                        ${coin.symbol} · {formatUsd(coin.marketCap)} MC · {stats.age}
-                      </em>
-                    </span>
-                    <i aria-hidden>›</i>
-                  </Link>
-                ))
-              )}
-            </div>
-            <div className="search-modal-foot">
-              <span>
-                {coinHits.length === 0
-                  ? "0 results"
-                  : `${safePage * pageSize + 1} to ${Math.min(coinHits.length, safePage * pageSize + pageSize)} of ${coinHits.length}`}
-              </span>
-              <div>
-                <button type="button" disabled={safePage === 0} onClick={() => setPage(safePage - 1)}>
-                  Previous
-                </button>
-                <em>
-                  {safePage + 1} / {pageCount}
-                </em>
-                <button type="button" disabled={safePage >= pageCount - 1} onClick={() => setPage(safePage + 1)}>
-                  Next
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
+        <ShellSearchModal
+          query={query}
+          setQuery={setQuery}
+          searchVisible={searchVisible}
+          dialogRef={dialogRef}
+          onClose={closeSearch}
+          onSubmit={search}
+          sortBy={sortBy}
+          setSortBy={setSortBy}
+          age={age}
+          setAge={setAge}
+          phase={phase}
+          setPhase={setPhase}
+          category={category}
+          setCategory={setCategory}
+          page={page}
+          setPage={setPage}
+          menuOpen={menuOpen}
+          setMenuOpen={setMenuOpen}
+        />
       ) : null}
     </div>
   );
@@ -502,4 +387,3 @@ function CreatorClaim({
     </section>
   );
 }
-

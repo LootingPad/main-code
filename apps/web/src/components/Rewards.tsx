@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { AllBoxesIcon, ClaimedIcon, HoldingIcon, IneligibleIcon, UnclaimedIcon } from "@/components/Icons";
+import { Pager } from "@/components/Pager";
 import { TokenLogo } from "@/components/TokenLogo";
 import { SlidingTabs } from "@/components/SlidingTabs";
 import { useWallet } from "@/components/Wallet";
@@ -15,7 +16,10 @@ const statusLabel: Record<BoxStatus, string> = {
   ineligible: "Not eligible",
 };
 
-const ITEM = 60;
+const CASE_ITEM = 128;
+const CASE_GAP = 10;
+const CASE_STEP = CASE_ITEM + CASE_GAP;
+const BOXES_PER_PAGE = 12;
 
 type RewardFilter = "all" | "unclaimed" | "holding" | "claimed" | "ineligible";
 
@@ -199,46 +203,88 @@ function ShareCard({
   );
 }
 
-function PrizeReel({ reward, onDone }: { reward: string; onDone: () => void }) {
-  const copies = 8;
-  const strip = Array.from({ length: copies }, () => rewardPool).flat();
-  const winner = Math.max(0, rewardPool.indexOf(reward));
-  const land = (copies - 1) * rewardPool.length + winner;
-  const start = Math.max(0, land - rewardPool.length * 5);
-  const [offset, setOffset] = useState(start);
+function PrizeReveal({ reward, onDone }: { reward: string; onDone: () => void }) {
+  const trackRef = useRef<HTMLDivElement>(null);
   const doneRef = useRef(onDone);
   doneRef.current = onDone;
 
+  const copies = 12;
+  const strip = useRef(Array.from({ length: copies }, () => rewardPool).flat()).current;
+  const winner = Math.max(0, rewardPool.indexOf(reward));
+  const landIndex = (copies - 2) * rewardPool.length + winner;
+  const startIndex = Math.max(0, landIndex - rewardPool.length * 7);
+
+  const [shift, setShift] = useState(0);
+  const [ready, setReady] = useState(false);
+  const [landed, setLanded] = useState(false);
+  const empty = reward === "No reward";
+
   useEffect(() => {
+    const track = trackRef.current;
+    if (!track) return;
+
+    const center = track.clientWidth / 2 - CASE_ITEM / 2;
+    const from = center - startIndex * CASE_STEP;
+    const to = center - landIndex * CASE_STEP;
     const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
     if (reduce) {
-      setOffset(land);
-      const id = window.setTimeout(() => doneRef.current(), 180);
+      setShift(to);
+      setReady(true);
+      setLanded(true);
+      const id = window.setTimeout(() => doneRef.current(), 500);
       return () => window.clearTimeout(id);
     }
-    const frame = window.requestAnimationFrame(() => setOffset(land));
-    const id = window.setTimeout(() => doneRef.current(), 3100);
+
+    setShift(from);
+    setReady(false);
+    const start = window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        setReady(true);
+        setShift(to);
+      });
+    });
+    const lock = window.setTimeout(() => setLanded(true), 3400);
+    const done = window.setTimeout(() => doneRef.current(), 4200);
     return () => {
-      window.cancelAnimationFrame(frame);
-      window.clearTimeout(id);
+      window.cancelAnimationFrame(start);
+      window.clearTimeout(lock);
+      window.clearTimeout(done);
     };
-  }, [land]);
+  }, [landIndex, startIndex]);
 
   return (
-    <div className="reel-window">
-      <div className="reel-marker" />
-      <div
-        className="reel-strip"
-        style={{
-          transform: `translateY(${-offset * ITEM + ITEM}px)`,
-          transition: offset === start ? "none" : "transform 2.55s cubic-bezier(0.08, 0.68, 0.12, 1)",
-        }}
-      >
-        {strip.map((prize, index) => (
-          <div className={`reel-item${prize === "No reward" ? " is-empty" : ""}`} key={`${prize}-${index}`}>
-            {prize}
-          </div>
-        ))}
+    <div className={`case-open${landed ? " is-landed" : ""}${empty ? " is-empty" : ""}`}>
+      <div className="case-track" ref={trackRef}>
+        <div className="case-fade case-fade-left" aria-hidden />
+        <div className="case-fade case-fade-right" aria-hidden />
+        <div className="case-needle" aria-hidden />
+        <div
+          className={`case-strip${ready ? " is-running" : ""}`}
+          style={{ transform: `translate3d(${shift}px, 0, 0)` }}
+        >
+          {strip.map((prize, index) => {
+            const isWin = landed && index === landIndex;
+            return (
+              <div
+                key={`${prize}-${index}`}
+                className={`case-item${prize === "No reward" ? " is-miss" : ""}${isWin ? " is-win" : ""}`}
+              >
+                <span>{prize}</span>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+      <div className="case-meta">
+        {landed ? (
+          <>
+            <strong className="case-prize">{reward}</strong>
+            <p className="page-note">{empty ? "No reward this time" : "Prize locked in"}</p>
+          </>
+        ) : (
+          <p className="page-note">Opening box…</p>
+        )}
       </div>
     </div>
   );
@@ -248,6 +294,7 @@ export function Rewards() {
   const { connected, address, connect } = useWallet();
   const [boxes, setBoxes] = useState<LuckyBox[]>([]);
   const [filter, setFilter] = useState<RewardFilter>("all");
+  const [page, setPage] = useState(1);
   const [reel, setReel] = useState<{ box: LuckyBox; reward: string; phase: "spin" | "land" } | null>(null);
   const queueRef = useRef<LuckyBox[]>([]);
   const granted = useRef(new Set<string>());
@@ -255,7 +302,12 @@ export function Rewards() {
   useEffect(() => {
     setBoxes(connected ? boxesForWallet(address) : []);
     setFilter("all");
+    setPage(1);
   }, [connected, address]);
+
+  useEffect(() => {
+    setPage(1);
+  }, [filter]);
 
   const ready = boxes.filter(canClaim).length;
   const claimed = boxes.filter((box) => box.status === "claimed").length;
@@ -267,6 +319,9 @@ export function Rewards() {
     if (filter === "ineligible") return box.status === "ineligible";
     return true;
   });
+  const pages = Math.max(1, Math.ceil(visible.length / BOXES_PER_PAGE));
+  const safePage = Math.min(page, pages);
+  const paged = visible.slice((safePage - 1) * BOXES_PER_PAGE, safePage * BOXES_PER_PAGE);
 
   function grant(box: LuckyBox, reward: string) {
     if (granted.current.has(box.id)) return;
@@ -356,7 +411,7 @@ export function Rewards() {
       {connected ? <SlidingTabs ariaLabel="Box status" items={rewardFilters} value={filter} onChange={setFilter} /> : null}
       {connected ? (
         <>
-      <div className="table-wrap">
+      <div className="table-wrap rewards-board">
         <table className="coin-table rewards-table">
           <thead>
             <tr>
@@ -369,14 +424,14 @@ export function Rewards() {
             </tr>
           </thead>
           <tbody>
-            {visible.length === 0 ? (
+            {paged.length === 0 ? (
               <tr>
                 <td className="rewards-empty" colSpan={6}>
                   No boxes
                 </td>
               </tr>
             ) : null}
-            {visible.map((box) => {
+            {paged.map((box) => {
               const open = canClaim(box);
               const active = reel?.box.id === box.id;
               const prize = box.reward;
@@ -422,34 +477,42 @@ export function Rewards() {
             })}
           </tbody>
         </table>
+        {visible.length > BOXES_PER_PAGE ? (
+          <Pager page={safePage} pages={pages} onChange={setPage} />
+        ) : null}
       </div>
-      <ul className="app-rows">
-        {visible.length === 0 ? <li className="is-empty">No boxes</li> : null}
-        {visible.map((box) => {
-          const open = canClaim(box);
-          const active = reel?.box.id === box.id;
-          const prize = box.reward;
-          return (
-            <li key={box.id}>
-              <TokenLogo symbol={box.token} size={32} />
-              <div>
-                <strong>${box.token}</strong>
-                <span>
-                  #{box.id} · {statusLabel[box.status]}
-                  {prize ? ` · ${prize}` : ""}
-                </span>
-              </div>
-              {open ? (
-                <button type="button" className="claim-btn" disabled={Boolean(reel)} onClick={() => claimMany([box])}>
-                  {active ? "Claiming" : "Claim"}
-                </button>
-              ) : (
-                <b>{box.status === "holding" ? "Exit" : box.status === "claimed" ? "Done" : "—"}</b>
-              )}
-            </li>
-          );
-        })}
-      </ul>
+      <section className="sheet rewards-mobile-board">
+        <ul className="app-rows">
+          {paged.length === 0 ? <li className="is-empty">No boxes</li> : null}
+          {paged.map((box) => {
+            const open = canClaim(box);
+            const active = reel?.box.id === box.id;
+            const prize = box.reward;
+            return (
+              <li key={box.id}>
+                <TokenLogo symbol={box.token} size={32} />
+                <div>
+                  <strong>${box.token}</strong>
+                  <span>
+                    #{box.id} · {statusLabel[box.status]}
+                    {prize ? ` · ${prize}` : ""}
+                  </span>
+                </div>
+                {open ? (
+                  <button type="button" className="claim-btn" disabled={Boolean(reel)} onClick={() => claimMany([box])}>
+                    {active ? "Claiming" : "Claim"}
+                  </button>
+                ) : (
+                  <b>{box.status === "holding" ? "Exit" : box.status === "claimed" ? "Done" : "—"}</b>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+        {visible.length > BOXES_PER_PAGE ? (
+          <Pager page={safePage} pages={pages} onChange={setPage} />
+        ) : null}
+      </section>
         </>
       ) : null}
       {reel && (
@@ -470,8 +533,7 @@ export function Rewards() {
                 <p className="kicker">Lucky box</p>
                 <h2 className="claim-title">${reel.box.token}</h2>
                 <p className="page-note">Box #{reel.box.id}</p>
-                <PrizeReel key={`${reel.box.id}-${reel.reward}`} reward={reel.reward} onDone={finishSpin} />
-                <p className="page-note">Spinning prizes…</p>
+                <PrizeReveal key={`${reel.box.id}-${reel.reward}`} reward={reel.reward} onDone={finishSpin} />
               </>
             )}
           </div>
