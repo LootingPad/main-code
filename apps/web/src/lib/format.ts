@@ -26,6 +26,11 @@ export function formatUsd(value: number) {
 }
 
 export function formatPrice(value: number) {
-  if (value >= 0.01) return `$${value.toFixed(4)}`;
-  return `$${value.toFixed(6)}`;
+  if (!Number.isFinite(value) || value === 0) return "$0";
+  const abs = Math.abs(value);
+  const sign = value < 0 ? "-" : "";
+  if (abs >= 0.01) return `${sign}$${abs.toFixed(4)}`;
+  if (abs >= 0.000001) return `${sign}$${abs.toFixed(6)}`;
+  const digits = Math.min(12, Math.ceil(-Math.log10(abs)) + 3);
+  return `${sign}$${abs.toFixed(digits)}`;
 }

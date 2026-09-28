@@ -67,6 +67,7 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
         ...(init?.headers ?? {}),
       },
       cache: "no-store",
+      signal: init?.signal ?? AbortSignal.timeout(8_000),
     });
   } catch {
     throw new ApiError(0, "NETWORK", `Could not reach API at ${apiBase()}`);
@@ -105,6 +106,23 @@ export async function getHealth() {
 
 export async function getFees() {
   return apiGetData<FeesConfig>("/api/fees");
+}
+
+export async function prepareTrade(body: {
+  token: string;
+  side: "buy" | "sell";
+  amount: string;
+  wallet: string;
+  slippageBps: number;
+}) {
+  const response = await apiFetch<{
+    data: { calls: { to: `0x${string}`; data: `0x${string}`; value: string }[] };
+  }>("/api/trade/prepare", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return response.data;
 }
 
 export async function getLaunches(opts?: {
@@ -242,5 +260,7 @@ export function emptyStats(): LaunchWithStats["stats"] {
     change24h: 0,
     ath: 0,
     boxUsd: 0,
+    holders: 0,
+    bundlers: 0,
   };
 }

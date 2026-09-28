@@ -2,19 +2,24 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { emptyStats, getFees, getLaunchHolders, getLaunchTrades } from "@/lib/api";
+import { useAppKitNetwork, useAppKitProvider } from "@reown/appkit/react";
+import { ApiError, emptyStats, getFees, getLaunchHolders, getLaunchTrades, prepareTrade } from "@/lib/api";
+import { robinhoodChain } from "@/lib/chains";
 import { DRAFT_KEY } from "@/lib/draft";
-import { ETH_USD } from "@/lib/fees";
+import { ETH_USD, TRADE_FEE_USD } from "@/lib/fees";
 import { formatPrice, formatUsd, shortAddress } from "@/lib/format";
 import { PONS_LAUNCH_WINDOW } from "@/lib/launch-window";
+import { getTrenchToken, trenchHolders, trenchTicks, trenchToLaunch, trenchTrades, type TrenchTick } from "@/lib/trenches";
 import type { Holder, Launch, LaunchWithStats, MarketStats, TokenTrade } from "@/lib/types";
 import { useAsyncData } from "@/lib/use-async-data";
 import { GiftIcon, WalletIcon } from "./Icons";
 import { Pager } from "./Pager";
 import { SlidingTabs } from "./SlidingTabs";
+import { CandleChart } from "./CandleChart";
 import { Sparkline } from "./Sparkline";
 import { TokenLogo } from "./TokenLogo";
 import { useWallet } from "./Wallet";
+import { createPublicClient, http, type Address, type EIP1193Provider, type Hash, type Hex } from "viem";
 
 function resolveStats(launch: Launch | LaunchWithStats, initialStats?: MarketStats): MarketStats {
   if (initialStats) return initialStats;
@@ -23,12 +28,20 @@ function resolveStats(launch: Launch | LaunchWithStats, initialStats?: MarketSta
 }
 
 export function Terminal({
-  launch,
+  launch: initialLaunch,
   meta,
   initialStats,
+  chain = false,
+  holders: seededHolders,
+  trades: seededTrades,
+  ticks: seededTicks,
 }: {
   launch: Launch | LaunchWithStats;
   initialStats?: MarketStats;
+  chain?: boolean;
+  holders?: Holder[];
+  trades?: TokenTrade[];
+  ticks?: TrenchTick[];
   meta?: {
     website?: string;
     twitter?: string;
@@ -42,23 +55,67 @@ export function Terminal({
     exempt?: string;
   };
 }) {
+  const [shown, setShown] = useState(initialLaunch);
+  const [chainHolders, setChainHolders] = useState(seededHolders ?? []);
+  const [chainTrades, setChainTrades] = useState(seededTrades ?? []);
+  const [ticks, setTicks] = useState(seededTicks ?? []);
+  const launch = chain ? shown : initialLaunch;
   const { connected, address, connect } = useWallet();
+  const { walletProvider } = useAppKitProvider<EIP1193Provider>("eip155");
+  const { chainId, switchNetwork } = useAppKitNetwork();
   const quoteAsset = meta?.pair || "ETH";
-  const stats = resolveStats(launch, initialStats);
+  const stats = resolveStats(launch, chain ? ("stats" in shown ? shown.stats : initialStats) : initialStats);
   const { data: fees } = useAsyncData(() => getFees(), [], {
     initial: null as Awaited<ReturnType<typeof getFees>> | null,
   });
   const ethUsd = fees?.ETH_USD ?? ETH_USD;
-  const { data: holders } = useAsyncData(
+  const tradeFeeUsd = fees?.TRADE_FEE_USD ?? TRADE_FEE_USD;
+  const { data: remoteHolders } = useAsyncData(
     () => getLaunchHolders(launch.address),
     [launch.address],
-    { initial: [] as Holder[], enabled: !launch.draft },
+    { initial: [] as Holder[], enabled: !launch.draft && !chain },
   );
-  const { data: trades } = useAsyncData(
+  const { data: remoteTrades } = useAsyncData(
     () => getLaunchTrades(launch.address, { limit: 50 }),
     [launch.address],
-    { initial: [] as TokenTrade[], enabled: !launch.draft },
+    { initial: [] as TokenTrade[], enabled: !launch.draft && !chain },
   );
+  const holders = chain ? chainHolders : remoteHolders;
+  const trades = chain ? chainTrades : remoteTrades;
+  useEffect(() => {
+    setShown(initialLaunch);
+    setChainHolders(seededHolders ?? []);
+    setChainTrades(seededTrades ?? []);
+    setTicks(seededTicks ?? []);
+  }, [initialLaunch.address]);
+  useEffect(() => {
+    if (!chain) return;
+    let stop = false;
+    let busy = false;
+    const tick = async () => {
+      if (busy) return;
+      busy = true;
+      try {
+        const detail = await getTrenchToken(initialLaunch.address);
+        if (!detail || stop) return;
+        setShown(trenchToLaunch(detail.pair));
+        const nextTicks = trenchTicks(detail);
+        if (nextTicks.length > 0) setTicks(nextTicks);
+        if (detail.holders.length > 0) setChainHolders(trenchHolders(detail.holders));
+        if (detail.trades.length > 0) setChainTrades(trenchTrades(detail.trades));
+      } catch {
+        /* keep the last chain snapshot */
+      } finally {
+        busy = false;
+      }
+    };
+    void tick();
+    const id = window.setInterval(tick, 2000);
+    return () => {
+      stop = true;
+      window.clearInterval(id);
+    };
+  }, [chain, initialLaunch.address]);
   const [side, setSide] = useState<"buy" | "sell">("buy");
   const [dockOpen, setDockOpen] = useState(false);
   const [slippage, setSlippage] = useState("10");
@@ -72,6 +129,8 @@ export function Terminal({
   const [sl, setSl] = useState("");
   const [limitPrice, setLimitPrice] = useState("");
   const [amount, setAmount] = useState(meta?.initialBuy || "0.1");
+  const [trading, setTrading] = useState(false);
+  const [tradeError, setTradeError] = useState("");
   const [photo, setPhoto] = useState("");
   const [claimed, setClaimed] = useState({ creator: false, pool: false });
   const [dataTab, setDataTab] = useState<"holders" | "tx">("holders");
@@ -79,10 +138,12 @@ export function Terminal({
   const quote = useMemo(() => {
     const value = Number(amount);
     if (!Number.isFinite(value) || value <= 0 || launch.priceUsd <= 0) return 0;
-    return side === "buy" ? (value * ethUsd) / launch.priceUsd : (value * launch.priceUsd) / ethUsd;
-  }, [amount, ethUsd, launch.priceUsd, side]);
+    if (side === "buy") return (value * ethUsd) / launch.priceUsd;
+    const received = (value * launch.priceUsd) / ethUsd;
+    return quoteAsset === "ETH" ? Math.max(0, received - tradeFeeUsd / ethUsd) : received;
+  }, [amount, ethUsd, launch.priceUsd, quoteAsset, side, tradeFeeUsd]);
 
-  const up = launch.change1h >= 0;
+  const up = chain ? launch.marketCap >= (stats.ath || launch.marketCap) : launch.change1h >= 0;
   const creatorShare = 100 - launch.luckyShare;
 
   useEffect(() => {
@@ -96,7 +157,7 @@ export function Terminal({
     }
   }, [launch.draft, launch.symbol]);
 
-  const links = socials(launch, meta);
+  const links = socials(launch, meta, chain);
 
   const [presets, setPresets] = useState(["0.1", "0.25", "0.5", "1"]);
   const [sellPercents, setSellPercents] = useState([25, 50, 75, 100]);
@@ -217,6 +278,54 @@ export function Terminal({
     setPresetOpen(true);
   }
 
+  async function submitTrade() {
+    setTradeError("");
+    if (!connected) {
+      connect();
+      return;
+    }
+    const value = Number(amount);
+    if (!(value > 0)) {
+      setTradeError("Enter an amount above 0.");
+      return;
+    }
+    if (side === "sell" && quoteAsset === "ETH" && quote <= 0) {
+      setTradeError("Amount is below the $0.056 fee.");
+      return;
+    }
+    setTrading(true);
+    let sent = 0;
+    let callCount = 0;
+    try {
+      const prepared = await prepareTrade({
+        token: launch.address,
+        side,
+        amount,
+        wallet: address,
+        slippageBps: Math.min(5000, Math.max(0, Math.round(Number(slippage) * 100) || 1000)),
+      });
+      if (!walletProvider) {
+        connect();
+        return;
+      }
+      if (activeChainId(chainId) !== robinhoodChain.id) await switchNetwork(robinhoodChain);
+      const rpc = robinhoodChain.rpcUrls.default.http[0];
+      const reader = createPublicClient({ chain: robinhoodChain, transport: http(rpc) });
+      callCount = prepared.calls.length;
+      const hashes = await sendTradeCalls(walletProvider, address as Address, prepared.calls);
+      for (const hash of hashes) {
+        const receipt = await reader.waitForTransactionReceipt({ hash, timeout: 60_000 });
+        if (receipt.status === "reverted") throw new Error("Transaction reverted.");
+        sent += 1;
+      }
+    } catch (err) {
+      if (sent > 0 && sent < callCount) setTradeError("The trade was not completed.");
+      else setTradeError(tradeErrorText(err));
+    } finally {
+      setTrading(false);
+    }
+  }
+
   function savePresets() {
     const next = presetDraft.map((value) => value.trim());
     if (side === "buy") {
@@ -272,7 +381,7 @@ export function Terminal({
           {photo ? (
             <img src={photo} alt="" className="token-mark object-cover" width={64} height={64} decoding="async" />
           ) : (
-            <TokenLogo symbol={launch.symbol} size={64} />
+            <TokenLogo symbol={launch.symbol} size={64} src={launch.logoUrl} address={launch.address} />
           )}
           <div className="token-id">
             <div className="token-title">
@@ -358,16 +467,29 @@ export function Terminal({
             <strong>{formatUsd(launch.marketCap)}</strong>
           </div>
           <div className="token-metric">
-            <span>1h</span>
-            <strong className={up ? "is-up" : "is-down"}>
-              {up ? "+" : ""}
-              {launch.change1h.toFixed(1)}%
-            </strong>
+            {chain ? (
+              <>
+                <span>Volume</span>
+                <strong>{formatUsd(stats.volume24h)}</strong>
+              </>
+            ) : (
+              <>
+                <span>1h</span>
+                <strong className={up ? "is-up" : "is-down"}>
+                  {up ? "+" : ""}
+                  {launch.change1h.toFixed(1)}%
+                </strong>
+              </>
+            )}
           </div>
         </div>
 
         <div className="token-chart">
-          <Sparkline seed={launch.symbol} width={640} height={210} fill up={up} />
+          {chain ? (
+            <CandleChart symbol={launch.symbol} ticks={ticks} spot={launch.marketCap} />
+          ) : (
+            <Sparkline seed={launch.symbol} width={640} height={210} fill up={up} />
+          )}
         </div>
 
         <div className="token-progress">
@@ -385,6 +507,11 @@ export function Terminal({
           <Fact label="Creator tax" value={`${launch.creatorTax.toFixed(2)}%`} />
           <Fact label="Creator keeps" value={`${creatorShare}%`} />
           <Fact label="Lucky Boxes" value={`${launch.luckyShare}%`} />
+          {chain ? <Fact label="Age" value={stats.age} /> : null}
+          {chain ? <Fact label="Txns" value={stats.txns.toLocaleString("en-US")} /> : null}
+          {chain ? <Fact label="Holders" value={stats.holders.toLocaleString("en-US")} /> : null}
+          {chain ? <Fact label="Bundlers" value={stats.bundlers.toLocaleString("en-US")} /> : null}
+          {chain ? <Fact label="ATH" value={formatUsd(stats.ath)} /> : null}
           {meta?.pair ? <Fact label="Pair" value={meta.pair} /> : null}
           {meta?.holders === "1" || meta?.holders === "0" ? <Fact label="Fees to" value={meta.holders === "1" ? "Holders" : "Creator"} /> : null}
           {meta?.wallet ? <Fact label="Creator wallet" value={shortAddress(meta.wallet)} /> : null}
@@ -468,7 +595,9 @@ export function Terminal({
                     <td>
                       {formatAmount(row.amount)} {launch.symbol}
                     </td>
-                    <td>{row.eth.toFixed(3)}</td>
+                    <td>
+                      <QuoteAmount value={row.eth} />
+                    </td>
                     <td>{row.time}</td>
                   </tr>
                 );
@@ -743,12 +872,17 @@ export function Terminal({
           {presetError ? <p className="preset-error">{presetError}</p> : null}
         </div>
         <div className="token-quote">
+          <span>Fee</span>
+          <b>${tradeFeeUsd.toFixed(3)}</b>
+        </div>
+        <div className="token-quote">
           <span>You receive</span>
           <b>{quote === 0 ? "—" : side === "buy" ? `${formatAmount(quote)} ${launch.symbol}` : `${quote.toFixed(6)} ${quoteAsset}`}</b>
         </div>
-        <button type="button" className={`btn${side === "sell" ? " sell" : ""}`}>
-          {side === "buy" ? `Buy ${launch.symbol}` : `Sell ${launch.symbol}`}
+        <button type="button" className={`btn${side === "sell" ? " sell" : ""}`} disabled={trading} onClick={() => void submitTrade()}>
+          {trading ? "Confirm in wallet" : side === "buy" ? `Buy ${launch.symbol}` : `Sell ${launch.symbol}`}
         </button>
+        {tradeError ? <p className="trade-note">{tradeError}</p> : null}
       </aside>
       {mine ? (
         <Position
@@ -780,6 +914,74 @@ const pnlFields = [
 ] as const;
 
 type PnlField = (typeof pnlFields)[number][0];
+
+function hexValue(value: string) {
+  return `0x${BigInt(value).toString(16)}`;
+}
+
+async function sendTradeCalls(
+  provider: EIP1193Provider,
+  from: Address,
+  calls: { to: Address; data: Hex; value: string }[],
+): Promise<Hash[]> {
+  const call = calls[0];
+  if (!call) throw new Error("Nothing to send.");
+  if (calls.length === 1) {
+    const hash = (await provider.request({
+      method: "eth_sendTransaction",
+      params: [{ from, to: call.to, data: call.data, value: hexValue(call.value) }],
+    })) as Hash;
+    return [hash];
+  }
+  const sent = (await provider.request({
+    method: "wallet_sendCalls",
+    params: [
+      {
+        version: "2.0.0",
+        from,
+        chainId: `0x${robinhoodChain.id.toString(16)}`,
+        atomicRequired: true,
+        calls: calls.map((item) => ({ to: item.to, data: item.data, value: hexValue(item.value) })),
+      },
+    ],
+  })) as { id?: string } | string;
+  const id = typeof sent === "string" ? sent : sent.id;
+  if (!id) throw new Error("Wallet did not return a transaction.");
+  return waitForCallHashes(provider, id);
+}
+
+async function waitForCallHashes(provider: EIP1193Provider, id: string): Promise<Hash[]> {
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    const status = (await provider.request({
+      method: "wallet_getCallsStatus",
+      params: [id],
+    })) as { status?: number | string; receipts?: { transactionHash?: Hash }[] };
+    const code = Number(status.status);
+    if (code === 200 || status.status === "CONFIRMED") {
+      const hashes = (status.receipts ?? []).map((receipt) => receipt.transactionHash).filter((hash): hash is Hash => Boolean(hash));
+      if (hashes.length === 0) throw new Error("Transaction was not broadcast.");
+      return hashes;
+    }
+    if (code >= 400) throw new Error("Transaction failed.");
+    await new Promise((resolve) => window.setTimeout(resolve, 1500));
+  }
+  throw new Error("Transaction is still pending.");
+}
+
+function activeChainId(value: number | string | undefined) {
+  if (typeof value === "number") return value;
+  if (!value) return 0;
+  const raw = value.includes(":") ? value.split(":").pop() : value;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function tradeErrorText(err: unknown) {
+  if (err instanceof ApiError) return err.message || "Could not prepare the trade.";
+  const text = err instanceof Error ? err.message : "";
+  if (/reject|denied|cancel/i.test(text)) return "Transaction cancelled.";
+  return text ? text.slice(0, 140) : "Trade failed.";
+}
 
 function CheckIcon() {
   return (
@@ -1244,7 +1446,11 @@ function roundRectPath(ctx: CanvasRenderingContext2D, x: number, y: number, w: n
   ctx.closePath();
 }
 
-function socials(launch: Launch, meta?: { website?: string; twitter?: string; telegram?: string; discord?: string; farcaster?: string }) {
+function socials(
+  launch: Launch,
+  meta?: { website?: string; twitter?: string; telegram?: string; discord?: string; farcaster?: string },
+  chain = false,
+) {
   const provided = [
     linkChip("Website", meta?.website),
     linkChip("X", meta?.twitter),
@@ -1252,7 +1458,7 @@ function socials(launch: Launch, meta?: { website?: string; twitter?: string; te
     linkChip("Discord", meta?.discord),
     linkChip("Farcaster", meta?.farcaster),
   ].filter((item): item is { label: string; href: string } => Boolean(item));
-  if (provided.length > 0 || launch.draft) return provided;
+  if (provided.length > 0 || launch.draft || chain) return provided;
   const slug = launch.symbol.toLowerCase();
   return [
     { label: "Website", href: `https://${slug}.lootingpad.com` },
@@ -1347,6 +1553,43 @@ function BoostBadgeIcon() {
       />
     </svg>
   );
+}
+
+function QuoteAmount({ value }: { value: number }) {
+  const amount = compactQuote(value);
+  if (amount.kind === "plain") return <>{amount.text}</>;
+  return (
+    <span className="tiny-amt" title={value.toString()} aria-label={value.toString()}>
+      {amount.sign}0.0<span className="tiny-zero">{amount.zeros}</span>
+      {amount.digits}
+    </span>
+  );
+}
+
+function compactQuote(value: number):
+  | { kind: "plain"; text: string }
+  | { kind: "tiny"; sign: string; zeros: number; digits: string } {
+  if (!Number.isFinite(value)) return { kind: "plain", text: "0" };
+  const sign = value < 0 ? "-" : "";
+  const abs = Math.abs(value);
+  if (abs === 0) return { kind: "plain", text: "0" };
+  if (abs >= 0.01) {
+    const digits = abs >= 100 ? 2 : abs >= 1 ? 3 : 4;
+    return { kind: "plain", text: `${sign}${trimZeros(abs.toFixed(digits))}` };
+  }
+  if (abs >= 0.001) {
+    const truncated = Math.floor(abs * 1e4 + 1e-8) / 1e4;
+    return { kind: "plain", text: `${sign}${trimZeros(truncated.toFixed(4))}` };
+  }
+  const [mantissa, expRaw] = abs.toExponential(3).split("e");
+  const zeros = Math.abs(Number(expRaw)) - 1;
+  const digits = mantissa.replace(".", "").replace(/0+$/, "").slice(0, 4);
+  if (zeros < 3 || !digits) return { kind: "plain", text: `${sign}${trimZeros((Math.floor(abs * 1e4 + 1e-8) / 1e4).toFixed(4))}` };
+  return { kind: "tiny", sign, zeros, digits };
+}
+
+function trimZeros(text: string) {
+  return text.replace(/(\.\d*?)0+$/, "$1").replace(/\.$/, "");
 }
 
 function formatEth(value: number) {

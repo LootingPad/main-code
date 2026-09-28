@@ -41,6 +41,8 @@ export type MarketStats = {
   change24h: number;
   ath: number;
   boxUsd: number;
+  holders: number;
+  bundlers: number;
 };
 
 export type LaunchWithStats = Launch & { stats: MarketStats };
@@ -168,6 +170,7 @@ export type FeesConfig = {
   PROTOCOL_BURN_SHARE: number;
   ETH_USD: number;
   LOOTING_PRICE_USD: number;
+  TRADE_FEE_USD: number;
   stakingLocks: Array<{ id: StakingLockId; label: string; rate: number }>;
 };
 

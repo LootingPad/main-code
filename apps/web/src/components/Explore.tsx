@@ -3,10 +3,9 @@
 import Link from "next/link";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { exploreStreamUrl, getLaunches } from "@/lib/api";
-import { formatCount, formatUsd } from "@/lib/format";
+import { formatCount, formatUsd, shortAddress } from "@/lib/format";
+import { getVisibleTrenchPairs, trenchToLaunch, trenchesSocketUrl, type TrenchPhase, type TrenchSnapshot, type TrenchUpdate } from "@/lib/trenches";
 import type { LaunchWithStats } from "@/lib/types";
-import { useAsyncData } from "@/lib/use-async-data";
 import { SlidingTabs } from "./SlidingTabs";
 import { Sparkline } from "./Sparkline";
 import { TokenLogo } from "./TokenLogo";
@@ -103,8 +102,9 @@ function byNewest(a: LaunchWithStats, b: LaunchWithStats) {
   return a.progress - b.progress;
 }
 
-/** Session peak mcap — keeps ATH after dips so sparkles can turn off. */
+/** Session peak mcap. Sparks only after this peak is broken, then off again on a dip. */
 const athPeakByToken = new Map<string, number>();
+const athFreshByToken = new Map<string, boolean>();
 
 function resolveAth(launch: LaunchWithStats) {
   const key = launch.address.toLowerCase();
@@ -115,17 +115,20 @@ function resolveAth(launch: LaunchWithStats) {
       fromSpark = launch.marketCap * (sparkMax / launch.priceUsd);
     }
   }
-  const peak = Math.max(
-    athPeakByToken.get(key) ?? 0,
-    launch.stats.ath || 0,
-    launch.marketCap || 0,
-    fromSpark,
-  );
+  const current = launch.marketCap || 0;
+  const reported = Math.max(launch.stats.ath || 0, current, fromSpark);
+  const seen = athPeakByToken.get(key);
+  const peak = Math.max(seen ?? 0, reported);
+  const broke = seen != null && reported > seen + Math.max(0.01, seen * 0.001);
+  let fresh = athFreshByToken.get(key) ?? false;
+  if (seen == null) fresh = false;
+  if (broke) fresh = true;
+  if (seen != null && current < peak) fresh = false;
   athPeakByToken.set(key, peak);
+  athFreshByToken.set(key, fresh);
   const capped = Math.min(MAX_MCAP, peak);
-  const progress = capped > 0 ? Math.min(100, Math.round((launch.marketCap / capped) * 100)) : 0;
-  // Only "at ATH" when within ~2% of the remembered peak (not every row).
-  const atAth = capped > 0 && launch.marketCap >= capped * 0.98;
+  const progress = capped > 0 ? Math.min(100, Math.round((current / capped) * 100)) : 0;
+  const atAth = fresh && capped > 0 && current >= peak;
   return { athValue: capped, progress, atAth };
 }
 
@@ -330,6 +333,16 @@ function TickValue({
   );
 }
 
+function uniqueLaunches(rows: LaunchWithStats[]) {
+  const seen = new Set<string>();
+  return rows.filter((row) => {
+    const key = row.address.toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 export function Explore() {
   const router = useRouter();
   const params = useSearchParams();
@@ -337,66 +350,82 @@ export function Explore() {
   const [board, setBoard] = useState<Board>("New Pair");
   const [boardTab, setBoardTab] = useState<Board>("New Pair");
   const stage = boardToStage(board);
-  const { data, error, loading } = useAsyncData(
-    () => getLaunches({ limit: 500, stage }),
-    [stage],
-    {
-      initial: [],
-      // Backup poll; live creates arrive via SSE
-      pollMs: stage === "new" || stage === "almost" ? 15000 : 20000,
-    },
-  );
-  const [livePush, setLivePush] = useState<LaunchWithStats[]>([]);
-  const feed = useMemo(() => {
-    if (stage !== "new" && stage !== "almost") return data;
-    const map = new Map<string, LaunchWithStats>();
-    for (const row of livePush) map.set(row.address.toLowerCase(), row);
-    for (const row of data) {
-      const key = row.address.toLowerCase();
-      if (!map.has(key)) map.set(key, row);
-    }
-    return [...map.values()];
-  }, [data, livePush, stage]);
+  const [phases, setPhases] = useState<Record<TrenchPhase, LaunchWithStats[]>>({
+    new: [],
+    "almost migrated": [],
+    migrated: [],
+  });
+  const [feedError, setFeedError] = useState<string | null>(null);
+  const [feedReady, setFeedReady] = useState(false);
 
   useEffect(() => {
-    setLivePush([]);
-  }, [stage]);
+    let socket: WebSocket | null = null;
+    let closed = false;
+    let retry: number | undefined;
 
-  useEffect(() => {
-    if (stage !== "new" && stage !== "almost") return;
-    let es: EventSource | null = null;
-    try {
-      es = new EventSource(exploreStreamUrl());
-    } catch {
-      return;
-    }
-
-    const onNew = (ev: MessageEvent) => {
-      try {
-        const card = JSON.parse(String(ev.data)) as LaunchWithStats;
-        if (!card?.address) return;
-        setLivePush((prev) => {
-          const key = card.address.toLowerCase();
-          const without = prev.filter((p) => p.address.toLowerCase() !== key);
-          return [card, ...without].slice(0, 200);
+    const connect = () => {
+      socket = new WebSocket(trenchesSocketUrl());
+      socket.onmessage = (event) => {
+        let message: TrenchSnapshot | TrenchUpdate;
+        try {
+          message = JSON.parse(String(event.data)) as TrenchSnapshot | TrenchUpdate;
+        } catch {
+          return;
+        }
+        if (message.type === "snapshot") {
+          setPhases({
+            new: uniqueLaunches((message.phases.new ?? []).map(trenchToLaunch)),
+            "almost migrated": uniqueLaunches((message.phases["almost migrated"] ?? []).map(trenchToLaunch)),
+            migrated: uniqueLaunches((message.phases.migrated ?? []).map(trenchToLaunch)),
+          });
+          setFeedReady(true);
+          setFeedError(null);
+          return;
+        }
+        if (message.type !== "pair" || !message.pair?.token) return;
+        const row = trenchToLaunch(message.pair);
+        const phase = message.phase;
+        const from = message.from;
+        setPhases((prev) => {
+          const next = {
+            new: prev.new,
+            "almost migrated": prev["almost migrated"],
+            migrated: prev.migrated,
+          };
+          if (from && from !== phase) {
+            next[from] = next[from].filter((item) => item.address.toLowerCase() !== row.address.toLowerCase());
+          }
+          const without = next[phase].filter((item) => item.address.toLowerCase() !== row.address.toLowerCase());
+          next[phase] = [row, ...without].slice(0, 50);
+          return next;
         });
-      } catch {
-        /* ignore */
-      }
+        setFeedReady(true);
+      };
+      socket.onerror = () => setFeedError("Live feed unavailable.");
+      socket.onclose = () => {
+        if (closed) return;
+        retry = window.setTimeout(connect, 1500);
+      };
     };
 
-    es.addEventListener("newToken", onNew);
-    es.addEventListener("tokenUpdate", onNew);
-    es.onerror = () => {
-      /* browser will retry EventSource */
-    };
-
+    connect();
     return () => {
-      es?.removeEventListener("newToken", onNew);
-      es?.removeEventListener("tokenUpdate", onNew);
-      es?.close();
+      closed = true;
+      if (retry) window.clearTimeout(retry);
+      socket?.close();
     };
-  }, [stage]);
+  }, []);
+
+  const feed = useMemo(() => {
+    if (stage === "almost") return uniqueLaunches(phases["almost migrated"]);
+    if (stage === "migrate") return uniqueLaunches(phases.migrated);
+    if (stage === "new") return uniqueLaunches(phases.new);
+    const merged = new Map<string, LaunchWithStats>();
+    for (const row of [...phases.migrated, ...phases["almost migrated"], ...phases.new]) {
+      merged.set(row.address.toLowerCase(), row);
+    }
+    return [...merged.values()];
+  }, [phases, stage]);
 
   const [windowId, setWindowId] = useState<WindowId>("latest");
   const [windowTab, setWindowTab] = useState<WindowId>("latest");
@@ -484,6 +513,42 @@ export function Explore() {
   const gridPages = Math.max(1, Math.ceil(rows.length / gridPerPage));
   const safeGridPage = Math.min(gridPage, gridPages);
   const gridRows = rows.slice((safeGridPage - 1) * gridPerPage, safeGridPage * gridPerPage);
+  const visibleRows = !phone && view === "table" ? tableRows : gridRows;
+  const visibleKey = visibleRows.map((row) => row.address.toLowerCase()).join(",");
+  const [liveByToken, setLiveByToken] = useState<Map<string, LaunchWithStats>>(() => new Map());
+
+  useEffect(() => {
+    const tokens = visibleKey ? visibleKey.split(",") : [];
+    if (tokens.length === 0) return;
+    let stopped = false;
+    let timer = 0;
+    let pending = false;
+    const pull = async () => {
+      if (pending) return;
+      pending = true;
+      try {
+        const pairs = await getVisibleTrenchPairs(tokens);
+        if (stopped) return;
+        setLiveByToken((current) => {
+          const next = new Map(current);
+          for (const pair of pairs) next.set(pair.token.toLowerCase(), trenchToLaunch(pair));
+          return next;
+        });
+      } catch {
+        /* keep the last chain numbers on this page */
+      } finally {
+        pending = false;
+        if (!stopped) timer = window.setTimeout(() => void pull(), 3000);
+      }
+    };
+    void pull();
+    return () => {
+      stopped = true;
+      window.clearTimeout(timer);
+    };
+  }, [visibleKey]);
+
+  const shown = (row: LaunchWithStats) => liveByToken.get(row.address.toLowerCase()) ?? row;
 
   const softSwap = (
     timerRef: { current: number | null },
@@ -617,6 +682,8 @@ export function Explore() {
     else rowEls.current.delete(address);
   };
 
+  const loading = !feedReady;
+  const error = feedError;
   const statusNote = loading && feed.length === 0
     ? "Loading launches…"
     : error && feed.length === 0
@@ -687,12 +754,13 @@ export function Explore() {
                 <th>Txns</th>
                 <th>24h vol</th>
                 <th>Box</th>
-                <th>1h</th>
-                <th>24h</th>
+                <th>Holder</th>
+                <th>Bundler</th>
               </tr>
             </thead>
             <tbody className={`page-swap${pageOut ? " is-out" : ""}`}>
-              {tableRows.map((launch, index) => {
+              {tableRows.map((stored, index) => {
+                const launch = shown(stored);
                 const { stats } = launch;
                 const volume = stats.volume24h;
                 const { athValue, progress, atAth } = resolveAth(launch);
@@ -710,17 +778,22 @@ export function Explore() {
                         onClick={(event) => event.stopPropagation()}
                       >
                         <span className="coin-rank">{rank}</span>
-                        <TokenLogo symbol={launch.symbol} size={26} src={launch.logoUrl} />
-                        <span className="coin-name">{launch.name}</span>
-                        <span className="ticker text-[var(--muted)]">${launch.symbol}</span>
+                        <TokenLogo symbol={launch.symbol} size={26} src={launch.logoUrl} address={launch.address} />
+                        <span className="coin-copy">
+                          <span className="coin-title-row">
+                            <span className="coin-name">{launch.name}</span>
+                            <span className="ticker text-[var(--muted)]">${launch.symbol}</span>
+                          </span>
+                          <span className="coin-ca">{shortAddress(launch.address)}</span>
+                        </span>
                       </Link>
                     </td>
                     <td>
                       <Sparkline
-                        seed={launch.symbol}
+                        seed={launch.address}
                         width={76}
                         height={24}
-                        values={launch.sparkline}
+                        values={launch.sparkline ?? []}
                         up={(launch.change1h || launch.stats.change24h) >= 0}
                       />
                     </td>
@@ -743,18 +816,8 @@ export function Explore() {
                     <td>
                       <TickValue value={formatUsd(stats.boxUsd)} />
                     </td>
-                    <td className={launch.change1h >= 0 ? "up" : "down"}>
-                      <TickValue
-                        value={`${launch.change1h >= 0 ? "↑" : "↓"} ${Math.abs(launch.change1h).toFixed(1)}%`}
-                        tone="pct"
-                      />
-                    </td>
-                    <td className={stats.change24h >= 0 ? "up" : "down"}>
-                      <TickValue
-                        value={`${stats.change24h >= 0 ? "↑" : "↓"} ${Math.abs(stats.change24h).toFixed(1)}%`}
-                        tone="pct"
-                      />
-                    </td>
+                    <td>{formatCount(stats.holders)}</td>
+                    <td>{formatCount(stats.bundlers)}</td>
                   </tr>
                 );
               })}
@@ -769,7 +832,8 @@ export function Explore() {
         <div className="pair-grid-shell" ref={gridBoardRef}>
           <div className="pair-grid-panel">
             <div className={`pair-grid page-swap${pageOut ? " is-out" : ""}`}>
-            {gridRows.map((launch) => {
+            {gridRows.map((stored) => {
+              const launch = shown(stored);
               const { stats } = launch;
               const volume = stats.volume24h;
               const { athValue, progress, atAth } = resolveAth(launch);
@@ -781,10 +845,11 @@ export function Explore() {
                   className="pair-card"
                 >
                   <div className="pair-head">
-                    <TokenLogo symbol={launch.symbol} size={40} src={launch.logoUrl} />
+                    <TokenLogo symbol={launch.symbol} size={40} src={launch.logoUrl} address={launch.address} />
                     <div className="pair-id">
                       <p>{launch.name}</p>
-                      <p>${launch.symbol}</p>
+                      <p className="pair-symbol">${launch.symbol}</p>
+                      <p className="pair-ca">{shortAddress(launch.address)}</p>
                     </div>
                     <p className={launch.change1h >= 0 ? "pair-chg up" : "pair-chg down"}>
                       {launch.change1h >= 0 ? "↑" : "↓"} {Math.abs(launch.change1h).toFixed(1)}%
@@ -792,11 +857,11 @@ export function Explore() {
                   </div>
                   <div className="pair-chart">
                     <Sparkline
-                      seed={launch.symbol}
+                      seed={launch.address}
                       width={240}
                       height={36}
                       fluid
-                      values={launch.sparkline}
+                      values={launch.sparkline ?? []}
                       up={(launch.change1h || launch.stats.change24h) >= 0}
                     />
                     <div className="pair-mcap">
@@ -839,7 +904,7 @@ export function Explore() {
                     </div>
                     <div>
                       <dt>Box</dt>
-                      <dd>{launch.luckyShare}%</dd>
+                      <dd>{formatUsd(stats.boxUsd)}</dd>
                     </div>
                     <div>
                       <dt>24h</dt>

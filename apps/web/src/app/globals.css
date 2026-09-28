@@ -1923,9 +1923,36 @@ input[type="range"] {
   text-align: right;
 }
 
+.coin-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.coin-title-row {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 6px;
+}
+
 .coin-name {
+  overflow: hidden;
   font-weight: 600;
   letter-spacing: -0.02em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.coin-ca,
+.pair-ca {
+  color: var(--muted);
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.01em;
+  line-height: 1.2;
 }
 
 .explore-title {
@@ -4210,11 +4237,15 @@ textarea.field.tight {
   white-space: nowrap;
 }
 
-.pair-id p:last-child {
+.pair-id .pair-symbol {
   margin-top: 2px;
   color: var(--muted);
   font-size: 12px;
   line-height: 1.2;
+}
+
+.pair-ca {
+  margin-top: 1px;
 }
 
 .pair-chg {
@@ -5297,8 +5328,134 @@ textarea.field.tight {
   margin-top: 12px;
   overflow: hidden;
   border-radius: 16px;
-  background: rgba(0, 0, 0, 0.28);
-  padding: 12px 6px 4px;
+  background: #0c0e11;
+  padding: 4px 0 0;
+}
+
+.chart-frames {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 6px 10px 0;
+}
+
+.chart-frames [role="tablist"] {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.chart-frames button {
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #8d8d8d;
+  cursor: pointer;
+  font-size: 12px;
+  padding: 4px 8px;
+}
+
+.chart-frames button.is-on {
+  background: rgba(255, 255, 255, 0.08);
+  color: #f5f5f5;
+}
+
+.chart-frames button.chart-live {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  background: transparent;
+  color: #2ebd85;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.chart-frames button.chart-live.is-back {
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #f5f5f5;
+}
+
+.chart-frames button.chart-live.is-back i {
+  background: #8d8d8d;
+  animation: none;
+  box-shadow: none;
+}
+
+.chart-live {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  color: #2ebd85;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.chart-live i {
+  width: 7px;
+  height: 7px;
+  border-radius: 99px;
+  background: #2ebd85;
+  box-shadow: 0 0 0 0 rgba(46, 189, 133, 0.7);
+  animation: chart-live 1.6s ease-out infinite;
+}
+
+@keyframes chart-live {
+  70% {
+    box-shadow: 0 0 0 6px rgba(46, 189, 133, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(46, 189, 133, 0);
+  }
+}
+
+.chart-ohlc,
+.chart-volume-label {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  padding: 6px 12px 0;
+  color: #bdbdbd;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.chart-ohlc b {
+  color: #f5f5f5;
+  font-weight: 650;
+}
+
+.chart-ohlc .is-up,
+.chart-volume-label .is-up {
+  color: #2ebd85;
+}
+
+.chart-ohlc .is-down {
+  color: #f6465d;
+}
+
+.chart-volume-label {
+  color: #8d8d8d;
+  padding-top: 2px;
+}
+
+.trade-chart {
+  position: relative;
+}
+
+.chart-host {
+  height: 360px;
+  width: 100%;
+}
+
+.ohlc-empty {
+  display: grid;
+  height: 220px;
+  place-items: center;
+  color: var(--muted);
+  font-size: 13px;
 }
 
 .token-progress {
@@ -5490,6 +5647,17 @@ textarea.field.tight {
 
 .token-quote b {
   font-variant-numeric: tabular-nums;
+}
+
+.trade-note {
+  margin: 8px 0 0;
+  color: #f6465d;
+  font-size: 12px;
+}
+
+.token-trade .btn:disabled {
+  cursor: progress;
+  opacity: 0.7;
 }
 
 .token-trade .btn {
@@ -5880,6 +6048,20 @@ textarea.field.tight {
   text-align: right;
 }
 
+.tiny-amt {
+  font-variant-numeric: tabular-nums;
+}
+
+.tiny-zero {
+  display: inline-block;
+  margin: 0 1px;
+  color: #d7d7d7;
+  font-size: 0.78em;
+  font-weight: 700;
+  line-height: 1;
+  vertical-align: -0.28em;
+}
+
 .holders tr.is-you td {
   color: #ccff00;
 }
@@ -6158,18 +6340,25 @@ textarea.field.tight {
     grid-template-columns: minmax(0, 1fr) 320px;
   }
 
+  .token-stack,
+  .token-main,
+  .token-chart,
+  .trade-chart,
+  .chart-host {
+    min-width: 0;
+    max-width: 100%;
+  }
+
   .trade-stack {
-    position: fixed;
-    top: 72px;
-    right: var(--page-pad);
+    position: sticky;
+    top: calc(var(--shell-topbar-h) + 16px);
     z-index: 4;
-    width: 320px;
+    width: auto;
+    max-height: calc(100dvh - var(--shell-topbar-h) - 28px);
     display: grid;
     gap: 12px;
     align-content: start;
-    /* Keep column reserved via explicit 320px track; fixed removes visual motion */
-    transform: translate3d(0, 0, 0);
-    backface-visibility: hidden;
+    overflow: auto;
   }
 
   .trade-setup {

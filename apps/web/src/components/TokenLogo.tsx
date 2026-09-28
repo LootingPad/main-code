@@ -1,18 +1,42 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
+
+const IPFS_GATEWAYS = ["https://ipfs.io/ipfs/", "https://dweb.link/ipfs/", "https://gateway.pinata.cloud/ipfs/"];
+
+/** Browsers cannot load ipfs:// directly. Try public gateways, then the letter mark. */
+function logoSources(src: string): string[] {
+  const value = src.trim();
+  if (!value) return [];
+  const ipfs = value.match(/^ipfs:\/\/(?:ipfs\/)?(.+)$/i);
+  if (ipfs) {
+    const cid = ipfs[1].replace(/^\/+/, "");
+    return IPFS_GATEWAYS.map((gateway) => `${gateway}${cid}`);
+  }
+  const ar = value.match(/^ar:\/\/(.+)$/i);
+  if (ar) return [`https://arweave.net/${ar[1]}`];
+  return [value];
+}
 
 export function TokenLogo({
   symbol,
   size = 32,
   src,
+  address,
 }: {
   symbol: string;
   size?: number;
   src?: string | null;
+  /** Loads the image through the API so ipfs and blocked CDNs still render. */
+  address?: string;
 }) {
-  const [broken, setBroken] = useState(false);
-  const url = src && !broken ? src : null;
+  const sources = [
+    ...(address ? [`/backend-api/trenches/image/${address}`] : []),
+    ...(src ? logoSources(src) : []),
+  ];
+  const [index, setIndex] = useState(0);
+  useEffect(() => setIndex(0), [src, address]);
+  const url = sources[index] ?? null;
 
   if (url) {
     return (
@@ -27,7 +51,7 @@ export function TokenLogo({
         loading="lazy"
         decoding="async"
         referrerPolicy="no-referrer"
-        onError={() => setBroken(true)}
+        onError={() => setIndex((current) => current + 1)}
       />
     );
   }

@@ -7,6 +7,8 @@ export const CREATOR_FEE_SHARE = 0.8;
 export const PROTOCOL_BURN_SHARE = 0.2;
 export const ETH_USD = 3500;
 export const LOOTING_PRICE_USD = 0.0024;
+/** Flat platform fee on every buy and sell. */
+export const TRADE_FEE_USD = 0.056;
 
 export function feeAccrualWeight(launch: Launch) {
   return 0.35 + launch.progress / 200;
@@ -14,6 +16,21 @@ export function feeAccrualWeight(launch: Launch) {
 
 export function accruedFeeUsd(launch: Launch) {
   return launch.marketCap * (launch.creatorTax / 100) * feeAccrualWeight(launch);
+}
+
+/**
+ * Lucky Box accrual for a launch row.
+ * Spec §6: estimate creator tax from market cap, tax rate, and curve progress.
+ * The box is a cut of that creator tax (at least 0.5 percentage points, never above the tax).
+ * Protocol burn (20%) and holder share do not reduce this cut.
+ * Trench feeds have no per-token lucky-box bps, so the row uses that 0.5% floor.
+ */
+export function luckyBoxUsd(mcapUsd: number, creatorTaxPercent: number, progress: number) {
+  const tax = Math.max(0, creatorTaxPercent);
+  const boxCut = Math.min(0.5, tax);
+  const curve = Math.min(100, Math.max(0, progress));
+  const weight = 0.35 + curve / 200;
+  return mcapUsd * (boxCut / 100) * weight;
 }
 
 export function splitCreatorFeeUsd(feeUsd: number) {

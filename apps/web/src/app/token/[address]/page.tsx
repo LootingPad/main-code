@@ -1,5 +1,6 @@
 import { Terminal } from "@/components/Terminal";
 import { draftLaunch, getLaunch } from "@/lib/api";
+import { getTrenchToken, trenchHolders, trenchPairLabel, trenchTicks, trenchToLaunch, trenchTrades } from "@/lib/trenches";
 import type { LaunchWithStats } from "@/lib/types";
 
 type PageProps = {
@@ -26,6 +27,30 @@ type PageProps = {
 export default async function TokenPage({ params, searchParams }: PageProps) {
   const { address } = await params;
   const query = await searchParams;
+
+  const trench = await getTrenchToken(address).catch(() => null);
+  if (trench) {
+    const launch = trenchToLaunch(trench.pair);
+    const socials = trench.pair.socials;
+    return (
+      <Terminal
+        launch={launch}
+        initialStats={launch.stats}
+        chain
+        holders={trenchHolders(trench.holders)}
+        trades={trenchTrades(trench.trades)}
+        ticks={trenchTicks(trench)}
+        meta={{
+          website: socials?.website,
+          twitter: socials?.twitter,
+          telegram: socials?.telegram,
+          discord: socials?.discord,
+          farcaster: socials?.farcaster,
+          pair: trenchPairLabel(trench.pair.pairToken),
+        }}
+      />
+    );
+  }
 
   let launch: LaunchWithStats | ReturnType<typeof draftLaunch>;
   try {
