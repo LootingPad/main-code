@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { PageTitle } from "@/components/PageInfo";
 import { getAnalytics, getFees } from "@/lib/api";
 import { DEV_LOCK_FEE_ETH } from "@/lib/fees";
 import { formatCount, formatUsd } from "@/lib/format";
@@ -47,10 +48,9 @@ export function Analytics() {
   return (
     <div className="analytics-page">
       <div className="page-head">
-        <div>
-          <h1 className="explore-title">Analytics</h1>
-          <p className="page-note">Season 01 totals across launches, staking vaults, and Dev Lock.</p>
-        </div>
+        <PageTitle tip="Season totals across launches, staking vaults, and Dev Lock. Live launch stats show when indexed; staking / Dev Lock stay at zero until those contracts ship.">
+          Analytics
+        </PageTitle>
         <div className="analytics-range" role="group" aria-label="Time range">
           <button type="button" className={range === "24h" ? "on" : ""} onClick={() => setRange("24h")}>
             24h
@@ -88,7 +88,7 @@ function AnalyticsBody({
   feeLockRate: number;
 }) {
   const allTime = range === "all";
-  const ethUsd = data.ethUsd > 0 ? data.ethUsd : 3500;
+  const ethUsd = data.ethUsd > 0 ? data.ethUsd : 0;
   const { summary, fees, season, staking, devLock, series } = data;
 
   const volume = summary.volume;

@@ -211,36 +211,37 @@ LOOTING must not claim that the Lucky Box fee split is permanently immutable unl
 
 ### Desired creator model
 
-The creator chooses a creator-tax setting within Pons-supported limits. Product UI constraints (examples; tunable):
+The creator chooses a **total** creator-tax within Pons-supported limits, then splits that total between themselves and Lucky Boxes:
 
 - Tax presets: **1% / 2% / 3%**
 - Custom tax: **0.5%–5%** in **0.1%** steps
-- Lucky Box floor: **at least 0.5% of creator tax**; the box cut can never exceed the tax
+- Lucky Box floor: **at least 0.5 percentage points** of the total tax; the box cut can never exceed the tax
+- On-chain `creatorTaxBps` = that total (example: tax **1%** with boxes **0.5%** → keep **0.5%**, boxes **0.5%**, on-chain **1%**)
+
+Create fee on launch is **0.00085 ETH** total (Pons `launchFee` ≈ 0.0005 + LOOTING remainder 0.00035). Preferred path is **`LootingLaunchRouter`**: one user-signed tx pays both (router forwards Pons fee and sends 0.00035 to the launch fee wallet). Fallback without the router is two wallet calls (or EIP-5792 batch).
+
+Of the trading fee revenue, **Pons keeps its protocol share (~30%) from the standard fee pool** — it is **not** an extra percentage LOOTING adds on top of the creator’s tax choice.
 
 Example values below are configurable examples, NOT protocol constants:
 
 ```text
 Creator tax = 1.00%
 
-Creator share        80%
-Lucky Box share      20%
-
-Effective split of tax:
-Creator side         0.80%
-Lucky Box Treasury   0.20%
+You keep             0.50%
+Lucky Box Treasury   0.50%
+────────────────────────────
+On-chain creatorTax  1.00%
 ```
 
 Another creator may choose:
 
 ```text
-Creator tax = 1.00%
+Creator tax = 2.00%
 
-Creator share        50%
-Lucky Box share      50%
-
-Effective split of tax:
-Creator side         0.50%
+You keep             1.50%
 Lucky Box Treasury   0.50%
+────────────────────────────
+On-chain creatorTax  2.00%
 ```
 
 ### Protocol burn vs creator-side pool
@@ -455,6 +456,16 @@ A box may resolve to:
 Probability must be budget-backed.
 
 Before a season is activated, the protocol should validate that the maximum expected reward liability does not exceed the funded reward pool under the selected configuration.
+
+### Interim MVP payout (per-launch box pool)
+
+Until LOOTING / RWA auto-swap modules are complete:
+
+1. Admin allowlists prize ERC-20 addresses and seals a reward table (`kind`: miss | eth | erc20, plus `minShareBps` / `maxShareBps`).
+2. On open, the backend reads `luckyBoxClaimable(launchToken)` and counts unopened boxes on that launch (`n`).
+3. `fairShare = pool / n`. A win rolls a **deterministic random** ETH spend in `[fairShare × minShareBps, fairShare × maxShareBps]`, never exceeding the remaining pool — so outstanding unopened boxes cannot over-claim the treasury.
+4. **ETH** prizes: keeper credits `LootingLuckyBoxEthModule`; winner claims ETH.
+5. **ERC-20** prizes: keeper pulls the ETH budget, swaps via the approved router to the allowlisted token, and sends tokens to the winner at open (claim is a no-op). Labels like “25 LOOTING” are display names; economic size is the rolled ETH budget from that launch’s box pool.
 
 ---
 
@@ -1580,13 +1591,13 @@ Product extras at this step:
 Example UI:
 
 ```text
-Creator tax: 1.00%   (presets 1 / 2 / 3% or custom 0.5–5%)
+Creator tax: 2.00%   (presets 1 / 2 / 3% or custom 0.5–5%)
 
-Lucky Box cut        [ ≥ 0.5% of tax ]
+Lucky Box cut        [ ≥ 0.5% of total tax ]
 Remainder recipient  Creator wallet  |  Holders
 
 Estimated Lucky Box funding per $100k volume:
-$200
+$500
 
 Accrued-fee display:
   80% creator-side pool · 20% protocol burn (LOOTING)

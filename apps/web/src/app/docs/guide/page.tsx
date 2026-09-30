@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { PageTitle } from "@/components/PageInfo";
 
 const sections = [
   {
@@ -116,8 +117,7 @@ export default function DocsGuidePage() {
           <p className="doc-back">
             <Link href="/docs">← Docs</Link>
           </p>
-          <h1 className="explore-title">Detailed docs</h1>
-          <p className="page-note">How to launch, trade, earn Season XP, and open Lucky Boxes.</p>
+          <PageTitle tip="How to launch, trade, earn Season XP, and open Lucky Boxes.">Detailed docs</PageTitle>
         </div>
       </div>
       {sections.map((section) => (

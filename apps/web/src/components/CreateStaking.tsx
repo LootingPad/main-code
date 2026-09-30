@@ -13,6 +13,7 @@ import {
   type StakingLockId,
 } from "@/lib/staking-events";
 import { useAsyncData } from "@/lib/use-async-data";
+import { PageInfo, PageTitle } from "./PageInfo";
 import { TokenLogo } from "./TokenLogo";
 import { useWallet } from "./Wallet";
 
@@ -113,35 +114,15 @@ export function CreateStaking() {
       setNotice(locks.length === 0 ? "Pick at least one lock option." : "Enter a reward amount above 0.");
       return;
     }
-    const next: StakingEvent = {
-      id: `local-${coin.symbol}-${Date.now()}`,
-      address: coin.address,
-      symbol: coin.symbol,
-      name: coin.name,
-      creator: address,
-      reward: value,
-      staked: 0,
-      stakers: 0,
-      marketCap: coin.marketCap,
-      volume24h: coin.stats?.volume24h ?? 0,
-      durationDays,
-      locks: [...locks],
-      ends: endsAt,
-    };
-    setLocalPools((current) => [next, ...current]);
-    setReward("");
-    setNotice(
-      `Demo only — on-chain create not wired. Preview: ${formatStakingTokens(value)} ${coin.symbol} through ${formatStakingDate(endsAt)}.`,
-    );
+    setNotice("On-chain create staking is not wired yet — no demo pools are created.");
   };
 
   return (
     <div className="devlock-page">
       <div className="page-head">
-        <div>
-          <h1 className="explore-title">Create Staking</h1>
-          <p className="page-note">Spin up a staking event for any LOOTING-launched coin. Fund rewards, pick lock options, set the window.</p>
-        </div>
+        <PageTitle tip="Spin up a staking event for any LOOTING-launched coin. Fund rewards, pick lock options, set the window. StakingFactory is not deployed on Robinhood yet — create stays disabled until the contract address is set.">
+          Create Staking
+        </PageTitle>
       </div>
 
       {connected && coin ? (
@@ -287,9 +268,9 @@ export function CreateStaking() {
 
             <section className="sheet create-staking-events">
               <header>
-                <div>
+                <div className="page-title-row">
                   <h2>Events</h2>
-                  <p className="page-note">Pools you published from this wallet.</p>
+                  <PageInfo tip="Pools you published from this wallet." label="Events" />
                 </div>
                 <span className="create-staking-count">{pools.length}</span>
               </header>

@@ -17,6 +17,7 @@ import {
   type StakingPosition,
 } from "@/lib/staking-events";
 import { useAsyncData } from "@/lib/use-async-data";
+import { PageTitle } from "./PageInfo";
 import { Pager } from "./Pager";
 import { SlidingTabs } from "./SlidingTabs";
 import { TokenLogo } from "./TokenLogo";
@@ -28,7 +29,6 @@ const YEAR_SECONDS = 365 * 24 * 60 * 60;
 const EARN_PACE = 360;
 const EVENTS_PER_PAGE = 10;
 const POSITIONS_PER_PAGE = 10;
-const DEMO_PREFIX = "demo-";
 
 function formatLive(value: number) {
   return value.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -56,13 +56,12 @@ export function Staking() {
     { initial: [], enabled: connected },
   );
   const { data: launches } = useAsyncData(() => getLaunches({ limit: 100 }), [], { initial: [] });
-  const [demoPositions, setDemoPositions] = useState<StakingPosition[]>([]);
   const [positionEdits, setPositionEdits] = useState<Record<string, StakingPosition>>({});
   const [activeEventId, setActiveEventId] = useState<string | null>(null);
   const [activePositionId, setActivePositionId] = useState<string | null>(null);
   const [side, setSide] = useState<"stake" | "unstake">("stake");
   const [lock, setLock] = useState<StakingLockId>("30");
-  const [amount, setAmount] = useState("50000");
+  const [amount, setAmount] = useState("");
   const [balances, setBalances] = useState<Record<string, number>>({});
   const [notice, setNotice] = useState("");
   const [elapsed, setElapsed] = useState(0);
@@ -75,13 +74,10 @@ export function Staking() {
 
   const positions = useMemo(() => {
     if (!connected) return [];
-    const apiMerged = apiPositions
+    return apiPositions
       .map((item) => positionEdits[item.id] ?? item)
       .filter((item) => item.amount > 0);
-    const apiIds = new Set(apiMerged.map((item) => item.id));
-    const demos = demoPositions.filter((item) => !apiIds.has(item.id) && item.amount > 0);
-    return [...demos, ...apiMerged];
-  }, [connected, apiPositions, demoPositions, positionEdits]);
+  }, [connected, apiPositions, positionEdits]);
 
   const activeEvent = useMemo(() => {
     if (activeEventId) return events.find((item) => item.id === activeEventId) ?? null;
@@ -99,7 +95,7 @@ export function Staking() {
   const availableLocks = targetEvent?.locks ?? STAKING_LOCK_OPTIONS.map((item) => item.id);
   const selectedLock = availableLocks.includes(lock) ? lock : (availableLocks[0] as StakingLockId);
   const rate = lockRate(selectedLock);
-  const walletBalance = balances[symbol] ?? 1_000_000;
+  const walletBalance = balances[symbol] ?? 0;
   const stakedAmount = activePosition?.amount ?? 0;
   const cap = side === "stake" ? walletBalance : stakedAmount;
   const parsed = Number(amount.replace(/,/g, ""));
@@ -183,13 +179,6 @@ export function Staking() {
   };
 
   const patchPosition = (id: string, next: StakingPosition | null) => {
-    if (id.startsWith(DEMO_PREFIX)) {
-      setDemoPositions((current) => {
-        if (!next) return current.filter((item) => item.id !== id);
-        return current.map((item) => (item.id === id ? next : item));
-      });
-      return;
-    }
     setPositionEdits((current) => {
       if (!next) {
         const copy = { ...current };
@@ -209,58 +198,7 @@ export function Staking() {
       setNotice(value > cap ? "Amount is above the available balance." : "Enter an amount above 0.");
       return;
     }
-
-    if (side === "stake") {
-      setBalances((current) => ({
-        ...current,
-        [symbol]: (current[symbol] ?? walletBalance) - value,
-      }));
-      const existing = positions.find((item) => item.eventId === targetEvent.id && item.lock === selectedLock);
-      if (existing) {
-        const next = { ...existing, amount: existing.amount + value };
-        if (existing.id.startsWith(DEMO_PREFIX)) {
-          setDemoPositions((current) => current.map((item) => (item.id === existing.id ? next : item)));
-        } else {
-          setPositionEdits((current) => ({ ...current, [existing.id]: next }));
-        }
-        setActivePositionId(existing.id);
-      } else {
-        const next: StakingPosition = {
-          id: `${DEMO_PREFIX}${targetEvent.id}-${selectedLock}-${Date.now()}`,
-          eventId: targetEvent.id,
-          address: targetEvent.address,
-          symbol: targetEvent.symbol,
-          name: targetEvent.name,
-          amount: value,
-          lock: selectedLock,
-          claimable: 0,
-          started: Date.now(),
-        };
-        setDemoPositions((current) => [next, ...current]);
-        setActivePositionId(next.id);
-      }
-      setNotice("Demo only — on-chain stake not wired");
-    } else if (activePosition) {
-      setBalances((current) => ({
-        ...current,
-        [symbol]: (current[symbol] ?? walletBalance) + value,
-      }));
-      const nextAmount = activePosition.amount - value;
-      if (nextAmount <= 0) {
-        if (activePosition.id.startsWith(DEMO_PREFIX)) {
-          setDemoPositions((current) => current.filter((item) => item.id !== activePosition.id));
-        } else {
-          setPositionEdits((current) => ({
-            ...current,
-            [activePosition.id]: { ...activePosition, amount: 0, claimable: 0 },
-          }));
-        }
-        setActivePositionId(null);
-      } else {
-        patchPosition(activePosition.id, { ...activePosition, amount: nextAmount });
-      }
-      setNotice("Demo only — on-chain stake not wired");
-    }
+    setNotice("On-chain stake is not wired yet — no demo positions are created.");
     setAmount("");
   };
 
@@ -269,28 +207,15 @@ export function Staking() {
       connect();
       return;
     }
-    if (!activePosition) return;
-    const payout =
-      activePosition.claimable + bankedRef.current + ((performance.now() - anchorRef.current) / 1000) * perSecRef.current;
-    if (payout <= 0) return;
-    setBalances((current) => ({
-      ...current,
-      [symbol]: (current[symbol] ?? walletBalance) + payout,
-    }));
-    patchPosition(activePosition.id, { ...activePosition, claimable: 0 });
-    bankedRef.current = 0;
-    anchorRef.current = performance.now();
-    setElapsed(0);
-    setNotice("Demo only — on-chain stake not wired");
+    setNotice("On-chain claim is not wired yet.");
   };
 
   return (
     <div className="staking-page">
       <div className="page-head">
-        <div>
-          <h1 className="explore-title">Staking</h1>
-          <p className="page-note">Public pools from token creators. Stake in Events, manage what you hold in Positions.</p>
-        </div>
+        <PageTitle tip="Public pools from token creators. Stake in Events, manage what you hold in Positions. Staking contracts are not deployed yet — Events stay empty until StakingFactory is live.">
+          Staking
+        </PageTitle>
         <SlidingTabs
           items={[
             { id: "events", label: "Events" },

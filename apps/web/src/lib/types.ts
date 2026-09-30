@@ -28,6 +28,8 @@ export type Launch = {
   dexBoost?: number;
   /** Token image (http/ipfs gateway). */
   logoUrl?: string;
+  /** ISO launch time — used to sort New Pair (age labels alone are lossy). */
+  launchedAt?: string;
   /** Real price series for Explore sparkline. */
   sparkline?: number[];
 };
@@ -43,6 +45,12 @@ export type MarketStats = {
   boxUsd: number;
   holders: number;
   bundlers: number;
+  /** On-chain creator tax paid (quote ETH), when known from CurveBuy/Sell. */
+  creatorTaxPaidEth?: number;
+  /** Live RewardRouter creator claimable ETH. */
+  creatorClaimableEth?: number;
+  /** Live RewardRouter lucky-box pool claimable ETH. */
+  luckyBoxClaimableEth?: number;
 };
 
 export type LaunchWithStats = Launch & { stats: MarketStats };
@@ -51,15 +59,38 @@ export type LeaderboardRow = {
   wallet: string;
   tier: Tier;
   xp: number;
+  /** Boxes opened on the rewards leaderboard. */
   trades: number;
   rewards: string;
+  boxesOpened?: number;
+  rewardsWon?: number;
+  ethWon?: string;
 };
 
 export type LuckyBox = {
   id: string;
+  /** Launch token address (preferred) or legacy ticker. */
   token: string;
+  /** Ticker for display when `token` is an address. */
+  symbol?: string;
   status: BoxStatus;
+  /** Sealed-table outcome label. */
   reward?: string;
+  creditedWei?: string;
+  /** Rolled ETH budget from the launch box pool. */
+  payoutEth?: string;
+  /** USD value of the ETH budget. */
+  payoutUsd?: number;
+  /** Live lucky-box pool for this launch (ETH). */
+  boxPoolEth?: number;
+  /** Live lucky-box pool for this launch (USD). */
+  boxPoolUsd?: number;
+  /** Token amount received (ETH or ERC-20 after swap). */
+  prizeAmount?: number;
+  prizeSymbol?: string;
+  prizeKind?: "miss" | "eth" | "erc20";
+  prizeToken?: string | null;
+  claimableOnChain?: boolean;
   tx?: string;
   claimedAt?: string;
 };
@@ -161,6 +192,8 @@ export type Holder = {
   amount: number;
   share: number;
   entry: number;
+  /** Avg entry in quote (ETH) per token — multiply by ETH_USD for USD entry. */
+  entryQuote?: number;
 };
 
 export type FeesConfig = {
@@ -174,6 +207,15 @@ export type FeesConfig = {
   stakingLocks: Array<{ id: StakingLockId; label: string; rate: number }>;
 };
 
+export type RewardTableOutcome = {
+  label: string;
+  weight: number;
+  kind?: "miss" | "eth" | "erc20";
+  prizeToken?: string;
+  minShareBps?: number;
+  maxShareBps?: number;
+};
+
 export type RewardTable = {
   id: string;
   name: string;
@@ -181,6 +223,7 @@ export type RewardTable = {
   active: boolean;
   rewardPool: string[];
   config: unknown;
+  outcomes?: RewardTableOutcome[];
 };
 
 export type AnalyticsPayload = {

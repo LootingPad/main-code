@@ -4,8 +4,11 @@ import Link from "next/link";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { formatCount, formatUsd, shortAddress } from "@/lib/format";
-import { getVisibleTrenchPairs, trenchToLaunch, trenchesSocketUrl, type TrenchPhase, type TrenchSnapshot, type TrenchUpdate } from "@/lib/trenches";
+import { getFees } from "@/lib/api";
+import { getVisibleTrenchPairs, setTrenchEthUsd, trenchAgeLabel, trenchToLaunch, trenchesSocketUrl, type TrenchPhase, type TrenchSnapshot, type TrenchUpdate } from "@/lib/trenches";
 import type { LaunchWithStats } from "@/lib/types";
+import { useAsyncData } from "@/lib/use-async-data";
+import { PageFlash } from "./PageInfo";
 import { SlidingTabs } from "./SlidingTabs";
 import { Sparkline } from "./Sparkline";
 import { TokenLogo } from "./TokenLogo";
@@ -41,6 +44,9 @@ const windows = [
 type WindowId = (typeof windows)[number]["id"];
 
 const TABLE_PER_PAGE = 14;
+const MAX_PAGES = 2;
+/** Hard cap so Explore stays light — never keep more than 2 pages of rows in memory. */
+const BOARD_ROW_CAP = TABLE_PER_PAGE * MAX_PAGES;
 const GRID_CARD_WIDTH = 272;
 const GRID_GAP = 8;
 const GRID_ROWS = 3;
@@ -70,10 +76,19 @@ function byActivity(a: LaunchWithStats, b: LaunchWithStats) {
 
 function ageHours(age: string) {
   const value = Number.parseFloat(age);
+  if (!Number.isFinite(value)) return Number.POSITIVE_INFINITY;
+  if (age.endsWith("s")) return value / 3600;
   if (age.endsWith("m")) return value / 60;
   if (age.endsWith("h")) return value;
   if (age.endsWith("d")) return value * 24;
   return value;
+}
+
+function launchMs(launch: LaunchWithStats) {
+  const fromIso = launch.launchedAt ? Date.parse(launch.launchedAt) : Number.NaN;
+  if (Number.isFinite(fromIso)) return fromIso;
+  // Fallback for rows that only have a frozen age label.
+  return Date.now() - ageHours(launch.stats.age) * 3_600_000;
 }
 
 /** % change for the selected time window (Dex fields). */
@@ -97,8 +112,8 @@ function byWindowMovers(windowId: WindowId) {
 }
 
 function byNewest(a: LaunchWithStats, b: LaunchWithStats) {
-  const ageCmp = ageHours(a.stats.age) - ageHours(b.stats.age);
-  if (Math.abs(ageCmp) > 0.01) return ageCmp;
+  const ageCmp = launchMs(b) - launchMs(a);
+  if (ageCmp !== 0) return ageCmp;
   return a.progress - b.progress;
 }
 
@@ -355,8 +370,12 @@ export function Explore() {
     "almost migrated": [],
     migrated: [],
   });
-  const [feedError, setFeedError] = useState<string | null>(null);
   const [feedReady, setFeedReady] = useState(false);
+  const { data: fees } = useAsyncData(() => getFees(), [], { initial: null });
+
+  useEffect(() => {
+    if (fees?.ETH_USD && fees.ETH_USD > 0) setTrenchEthUsd(fees.ETH_USD);
+  }, [fees?.ETH_USD]);
 
   useEffect(() => {
     let socket: WebSocket | null = null;
@@ -374,17 +393,17 @@ export function Explore() {
         }
         if (message.type === "snapshot") {
           setPhases({
-            new: uniqueLaunches((message.phases.new ?? []).map(trenchToLaunch)),
-            "almost migrated": uniqueLaunches((message.phases["almost migrated"] ?? []).map(trenchToLaunch)),
-            migrated: uniqueLaunches((message.phases.migrated ?? []).map(trenchToLaunch)),
+            new: uniqueLaunches((message.phases.new ?? []).map(trenchToLaunch)).slice(0, BOARD_ROW_CAP),
+            "almost migrated": uniqueLaunches((message.phases["almost migrated"] ?? []).map(trenchToLaunch)).slice(0, BOARD_ROW_CAP),
+            migrated: uniqueLaunches((message.phases.migrated ?? []).map(trenchToLaunch)).slice(0, BOARD_ROW_CAP),
           });
           setFeedReady(true);
-          setFeedError(null);
           return;
         }
         if (message.type !== "pair" || !message.pair?.token) return;
         const row = trenchToLaunch(message.pair);
-        const phase = message.phase;
+        const phase = message.phase ?? "new";
+        if (phase !== "new" && phase !== "almost migrated" && phase !== "migrated") return;
         const from = message.from;
         setPhases((prev) => {
           const next = {
@@ -392,16 +411,18 @@ export function Explore() {
             "almost migrated": prev["almost migrated"],
             migrated: prev.migrated,
           };
-          if (from && from !== phase) {
+          if (from && from !== phase && (from === "new" || from === "almost migrated" || from === "migrated")) {
             next[from] = next[from].filter((item) => item.address.toLowerCase() !== row.address.toLowerCase());
           }
           const without = next[phase].filter((item) => item.address.toLowerCase() !== row.address.toLowerCase());
-          next[phase] = [row, ...without].slice(0, 50);
+          next[phase] = [row, ...without].slice(0, BOARD_ROW_CAP);
           return next;
         });
         setFeedReady(true);
       };
-      socket.onerror = () => setFeedError("Live feed unavailable.");
+      socket.onerror = () => {
+        /* reconnect via onclose — don't flash a status banner */
+      };
       socket.onclose = () => {
         if (closed) return;
         retry = window.setTimeout(connect, 1500);
@@ -482,19 +503,21 @@ export function Explore() {
 
   const rows = useMemo(() => {
     const matched = feed.filter((launch) => {
-      const text = `${launch.name} ${launch.symbol}`.toLowerCase();
+      const text = `${launch.name} ${launch.symbol} ${launch.address}`.toLowerCase();
       if (query && !text.includes(query)) return false;
       return true;
     });
 
-    // Time tabs sort the full list (don't drop rows) so table stays 14/page + pager.
+    let sorted: LaunchWithStats[];
     if (windowId !== "latest") {
-      return [...matched].sort(byWindowMovers(windowId));
+      sorted = [...matched].sort(byWindowMovers(windowId));
+    } else if (board === "New Pair") {
+      sorted = [...matched].sort(byNewest);
+    } else {
+      sorted = [...matched].sort(byActivity);
     }
-    if (board === "New Pair") {
-      return [...matched].sort(byNewest);
-    }
-    return [...matched].sort(byActivity);
+    // Cap at 2 pages so the table / live enrich stay cheap.
+    return sorted.slice(0, BOARD_ROW_CAP);
   }, [board, feed, query, windowId]);
 
   useEffect(() => {
@@ -506,11 +529,11 @@ export function Explore() {
     flipTops.current.clear();
   }, [board, windowId, query, view]);
 
-  const tablePages = Math.max(1, Math.ceil(rows.length / TABLE_PER_PAGE));
+  const tablePages = Math.min(MAX_PAGES, Math.max(1, Math.ceil(rows.length / TABLE_PER_PAGE)));
   const safeTablePage = Math.min(tablePage, tablePages);
   const tableRows = rows.slice((safeTablePage - 1) * TABLE_PER_PAGE, safeTablePage * TABLE_PER_PAGE);
 
-  const gridPages = Math.max(1, Math.ceil(rows.length / gridPerPage));
+  const gridPages = Math.min(MAX_PAGES, Math.max(1, Math.ceil(rows.length / gridPerPage)));
   const safeGridPage = Math.min(gridPage, gridPages);
   const gridRows = rows.slice((safeGridPage - 1) * gridPerPage, safeGridPage * gridPerPage);
   const visibleRows = !phone && view === "table" ? tableRows : gridRows;
@@ -531,7 +554,12 @@ export function Explore() {
         if (stopped) return;
         setLiveByToken((current) => {
           const next = new Map(current);
-          for (const pair of pairs) next.set(pair.token.toLowerCase(), trenchToLaunch(pair));
+          for (const pair of pairs) {
+            const launch = trenchToLaunch(pair);
+            const prev = next.get(pair.token.toLowerCase());
+            if (prev?.logoUrl && !launch.logoUrl) launch.logoUrl = prev.logoUrl;
+            next.set(pair.token.toLowerCase(), launch);
+          }
           return next;
         });
       } catch {
@@ -548,7 +576,25 @@ export function Explore() {
     };
   }, [visibleKey]);
 
-  const shown = (row: LaunchWithStats) => liveByToken.get(row.address.toLowerCase()) ?? row;
+  const shown = (row: LaunchWithStats) => {
+    const live = liveByToken.get(row.address.toLowerCase()) ?? row;
+    const launchedAt = live.launchedAt ?? row.launchedAt;
+    const logoUrl = live.logoUrl || row.logoUrl;
+    const age = launchedAt ? trenchAgeLabel(launchedAt) : live.stats.age;
+    if (
+      age === live.stats.age &&
+      live.launchedAt === launchedAt &&
+      live.logoUrl === logoUrl
+    ) {
+      return live;
+    }
+    return {
+      ...live,
+      launchedAt,
+      logoUrl,
+      stats: { ...live.stats, age },
+    };
+  };
 
   const softSwap = (
     timerRef: { current: number | null },
@@ -683,14 +729,7 @@ export function Explore() {
   };
 
   const loading = !feedReady;
-  const error = feedError;
-  const statusNote = loading && feed.length === 0
-    ? "Loading launches…"
-    : error && feed.length === 0
-      ? error
-      : !loading && feed.length === 0
-        ? "No launches yet."
-        : null;
+  const statusNote = !loading && feed.length === 0 ? "No launches yet." : null;
 
   return (
     <div className="explore-page">
@@ -709,7 +748,7 @@ export function Explore() {
           />
         )}
       </div>
-      {statusNote ? <p className="page-note">{statusNote}</p> : null}
+      {statusNote ? <PageFlash note={statusNote} /> : null}
       <div className="explore-tools">
         <SlidingTabs
           ariaLabel="Launch stage"
@@ -924,7 +963,7 @@ export function Explore() {
         </div>
       )}
       </div>
-      {!loading && !error && feed.length > 0 && rows.length === 0 && (
+      {!loading && feed.length > 0 && rows.length === 0 && (
         <p className="mt-8 text-sm text-[var(--muted)]">
           {query ? "No coins match that search." : "No coins in that window."}
         </p>

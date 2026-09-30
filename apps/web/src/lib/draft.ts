@@ -9,7 +9,10 @@ export type CoinDraft = {
   telegram: string;
   discord: string;
   farcaster: string;
+  /** Total on-chain creator tax %. */
   creatorFee: number;
+  /** Lucky Box cut in percentage points (floor 0.5, ≤ creatorFee). */
+  boxCut?: number;
   luckyShare: number;
   initialBuy: string;
   pair: string;

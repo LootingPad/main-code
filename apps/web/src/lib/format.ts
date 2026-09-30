@@ -30,7 +30,38 @@ export function formatPrice(value: number) {
   const abs = Math.abs(value);
   const sign = value < 0 ? "-" : "";
   if (abs >= 0.01) return `${sign}$${abs.toFixed(4)}`;
-  if (abs >= 0.000001) return `${sign}$${abs.toFixed(6)}`;
-  const digits = Math.min(12, Math.ceil(-Math.log10(abs)) + 3);
-  return `${sign}$${abs.toFixed(digits)}`;
+  if (abs >= 0.001) return `${sign}$${abs.toFixed(6)}`;
+  return `${sign}$${formatCompactDecimal(abs)}`;
+}
+
+const SUPER_DIGITS = ["⁰", "¹", "²", "³", "⁴", "⁵", "⁶", "⁷", "⁸", "⁹"];
+
+function toSuperscript(n: number): string {
+  return String(Math.max(0, Math.trunc(n)))
+    .split("")
+    .map((d) => SUPER_DIGITS[Number(d)] ?? d)
+    .join("");
+}
+
+/**
+ * Tiny decimals as meme-style compact form: `0.0000205` → `0.0⁴2`
+ * (superscript = count of zeros after the decimal before the first non-zero digit).
+ * Only compresses when there are 3+ leading zeros; keeps 1 significant digit so it stays short.
+ */
+export function formatCompactDecimal(value: number, maxSigDigits = 1): string {
+  if (!Number.isFinite(value) || value === 0) return "0";
+  const sign = value < 0 ? "-" : "";
+  const abs = Math.abs(value);
+  if (abs >= 0.001) {
+    const fixed = abs >= 1 ? abs.toFixed(4) : abs.toFixed(6);
+    return `${sign}${fixed.replace(/\.?0+$/, "")}`;
+  }
+  const digits = Math.min(18, Math.max(6, Math.ceil(-Math.log10(abs)) + Math.max(1, maxSigDigits) + 2));
+  const afterDot = abs.toFixed(digits).split(".")[1] ?? "";
+  let zeros = 0;
+  while (zeros < afterDot.length && afterDot[zeros] === "0") zeros += 1;
+  const sig = afterDot.slice(zeros).replace(/0+$/, "");
+  if (!sig) return `${sign}0`;
+  if (zeros < 3) return `${sign}0.${afterDot.slice(0, zeros + Math.min(sig.length, Math.max(1, maxSigDigits)))}`;
+  return `${sign}0.0${toSuperscript(zeros)}${sig.slice(0, Math.max(1, maxSigDigits))}`;
 }

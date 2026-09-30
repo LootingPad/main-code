@@ -1,3 +1,5 @@
+import { PageTitle } from "@/components/PageInfo";
+
 const sections = [
   {
     title: "What LOOTING is",
@@ -83,10 +85,7 @@ export default function LitepaperPage() {
   return (
     <div className="doc-page">
       <div className="page-head">
-        <div>
-          <h1 className="explore-title">Litepaper</h1>
-          <p className="page-note">How launches, fees, Lucky Boxes, and Season XP fit together.</p>
-        </div>
+        <PageTitle tip="How launches, fees, Lucky Boxes, and Season XP fit together.">Litepaper</PageTitle>
       </div>
       {sections.map((section) => (
         <section key={section.title} className="sheet doc-block">

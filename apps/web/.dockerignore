@@ -1,0 +1,9 @@
+node_modules
+.next
+out
+.vercel
+*.tsbuildinfo
+.env
+.env.local
+.env.*.local
+railway-web-up*.out.txt

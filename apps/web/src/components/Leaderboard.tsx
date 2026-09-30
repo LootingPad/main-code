@@ -5,17 +5,12 @@ import { getLeaderboard } from "@/lib/api";
 import { formatCount, shortAddress } from "@/lib/format";
 import type { LeaderboardRow } from "@/lib/types";
 import { useAsyncData } from "@/lib/use-async-data";
+import { PageFlash, PageInfo, PageTitle } from "./PageInfo";
 import { Pager } from "./Pager";
 import { useWallet } from "./Wallet";
 import { WalletAvatar } from "./WalletAvatar";
 
 const PAGE_SIZE = 20;
-
-const tierColor: Record<string, string> = {
-  Gold: "#f5c451",
-  Silver: "#d5d5d5",
-  Bronze: "#d08a4c",
-};
 
 const podium = {
   1: { label: "Gold", tone: "gold" },
@@ -45,6 +40,14 @@ function Trophy({ place }: { place: 1 | 2 | 3 }) {
   );
 }
 
+function openedCount(row: LeaderboardRow) {
+  return row.boxesOpened ?? row.trades ?? 0;
+}
+
+function wonCount(row: LeaderboardRow) {
+  return row.rewardsWon ?? 0;
+}
+
 export function Leaderboard() {
   const { connected, address } = useWallet();
   const [page, setPage] = useState(1);
@@ -68,20 +71,22 @@ export function Leaderboard() {
     : error
       ? error
       : ranked.length === 0
-        ? "No rankings yet."
+        ? "No Lucky Box rewards yet. Rankings appear when wallets open boxes and win."
         : null;
 
   return (
     <div>
       <div className="page-head">
-        <div>
-          <h1 className="explore-title">Leaderboard</h1>
-          <p className="page-note">Season XP. Wallets, not accounts.</p>
-        </div>
+        <PageTitle tip="Lucky Box rewards won. Ranked by opens that hit a prize.">Leaderboard</PageTitle>
         {connected && you ? null : (
-          <p className="page-note lb-you-empty">
-            {connected ? "Your wallet is not ranked this season." : "Connect a wallet to see its rank."}
-          </p>
+          <PageInfo
+            tip={
+              connected
+                ? "Open a Lucky Box and win a reward to appear here."
+                : "Connect a wallet to see its rank."
+            }
+            label="Your rank"
+          />
         )}
       </div>
       {connected && you ? (
@@ -106,18 +111,19 @@ export function Leaderboard() {
             <WalletAvatar address={you.wallet} />
             <span className="lb-you-id">
               <strong>{shortAddress(you.wallet)}</strong>
-              <span style={{ color: tierColor[you.tier] }}>{you.tier}</span>
+              <span>{you.rewards}</span>
             </span>
           </span>
           <span className="lb-you-stats">
-            <strong>{formatCount(you.xp)} XP</strong>
+            <strong>{formatCount(wonCount(you))} won</strong>
             <span>
-              {you.trades} trades · {you.rewards}
+              {formatCount(openedCount(you))} opened
+              {you.ethWon && you.ethWon !== "—" ? ` · ${you.ethWon}` : ""}
             </span>
           </span>
         </button>
       ) : null}
-      {statusNote ? <p className="page-note">{statusNote}</p> : null}
+      {statusNote ? <PageFlash note={statusNote} /> : null}
       {!loading && !error && ranked.length > 0 ? (
         <>
           <div className="table-wrap">
@@ -126,10 +132,9 @@ export function Leaderboard() {
                 <tr>
                   <th>Rank</th>
                   <th>Wallet</th>
-                  <th>Tier</th>
-                  <th>Season XP</th>
-                  <th>Trades</th>
-                  <th>Rewards</th>
+                  <th>Rewards won</th>
+                  <th>Boxes opened</th>
+                  <th>ETH won</th>
                 </tr>
               </thead>
               <tbody>
@@ -141,7 +146,11 @@ export function Leaderboard() {
                   return (
                     <tr
                       key={row.wallet}
-                      className={[medal ? `lb-row lb-row-${medal.tone}` : "", yours ? "lb-you" : ""].filter(Boolean).join(" ") || undefined}
+                      className={
+                        [medal ? `lb-row lb-row-${medal.tone}` : "", yours ? "lb-you" : ""]
+                          .filter(Boolean)
+                          .join(" ") || undefined
+                      }
                     >
                       <td>{medal ? <Trophy place={place} /> : rank}</td>
                       <td className="text-left font-semibold">
@@ -151,10 +160,9 @@ export function Leaderboard() {
                           {yours ? <em className="lb-you-tag">You</em> : null}
                         </span>
                       </td>
-                      <td style={{ color: tierColor[row.tier] }}>{row.tier}</td>
-                      <td className="up">{formatCount(row.xp)}</td>
-                      <td>{row.trades}</td>
-                      <td>{row.rewards}</td>
+                      <td className="up">{formatCount(wonCount(row))}</td>
+                      <td>{formatCount(openedCount(row))}</td>
+                      <td>{row.ethWon && row.ethWon !== "—" ? row.ethWon : "—"}</td>
                     </tr>
                   );
                 })}
@@ -168,7 +176,13 @@ export function Leaderboard() {
               const medal = rank <= 3 ? podium[place] : null;
               const yours = connected && row.wallet.toLowerCase() === address.toLowerCase();
               return (
-                <li key={row.wallet} className={[medal ? `is-${medal.tone}` : "", yours ? "is-you" : ""].filter(Boolean).join(" ") || undefined}>
+                <li
+                  key={row.wallet}
+                  className={
+                    [medal ? `is-${medal.tone}` : "", yours ? "is-you" : ""].filter(Boolean).join(" ") ||
+                    undefined
+                  }
+                >
                   <span className="app-rank">{medal ? <Trophy place={place} /> : rank}</span>
                   <WalletAvatar address={row.wallet} />
                   <div>
@@ -176,11 +190,14 @@ export function Leaderboard() {
                       {shortAddress(row.wallet)}
                       {yours ? <em className="lb-you-tag">You</em> : null}
                     </strong>
-                    <span style={{ color: tierColor[row.tier] }}>{row.tier}</span>
+                    <span>
+                      {formatCount(openedCount(row))} opened
+                      {row.ethWon && row.ethWon !== "—" ? ` · ${row.ethWon}` : ""}
+                    </span>
                   </div>
                   <b>
-                    {formatCount(row.xp)} XP
-                    <span>{row.trades} trades</span>
+                    {formatCount(wonCount(row))} won
+                    <span>rewards</span>
                   </b>
                 </li>
               );

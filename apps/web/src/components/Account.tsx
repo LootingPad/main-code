@@ -14,6 +14,7 @@ import { formatStakingTokens, lockLabel } from "@/lib/staking-events";
 import type { LaunchWithStats, StakingHistoryRow, WalletProfile, WalletTrade } from "@/lib/types";
 import { useAsyncData } from "@/lib/use-async-data";
 import { NavIcon } from "./Icons";
+import { PageInfo, PageTitle } from "./PageInfo";
 import { Pager } from "./Pager";
 import { SlidingTabs } from "./SlidingTabs";
 import { TokenLogo } from "./TokenLogo";
@@ -55,10 +56,7 @@ export function Account() {
   return (
     <div className="account-page">
       <div className="page-head">
-        <div>
-          <h1 className="explore-title">Account</h1>
-          <p className="page-note">Season XP, deployed tokens, trades, and staking for this wallet.</p>
-        </div>
+        <PageTitle tip="Season XP, deployed tokens, trades, and staking for this wallet.">Account</PageTitle>
       </div>
       <nav className="account-more" aria-label="More">
         <Link href="/staking">
@@ -83,14 +81,18 @@ export function Account() {
       ) : loading && !profile ? (
         <section className="sheet account-empty">
           <p className="account-kicker">Season</p>
-          <p className="account-empty-title">Loading account…</p>
-          <p className="page-note">Fetching XP, launches, trades, and staking for this wallet.</p>
+          <div className="page-title-row">
+            <p className="account-empty-title">Loading account…</p>
+            <PageInfo tip="Fetching XP, launches, trades, and staking for this wallet." label="Loading" />
+          </div>
         </section>
       ) : error && !profile ? (
         <section className="sheet account-empty">
           <p className="account-kicker">Season</p>
-          <p className="account-empty-title">Could not load account</p>
-          <p className="page-note">{error}</p>
+          <div className="page-title-row">
+            <p className="account-empty-title">Could not load account</p>
+            <PageInfo tip={error} label="Error" />
+          </div>
         </section>
       ) : profile ? (
         <Profile profile={profile} address={address} deployed={deployed} trades={trades} staking={staking} />
@@ -168,24 +170,29 @@ function Profile({
 
       <section className="account-section">
         <div className="account-board-head">
-          <SlidingTabs
-            ariaLabel="Account activity"
-            tone="quiet"
-            items={[
-              { id: "deployed" as const, label: `Deployed (${deployed.length})` },
-              { id: "trades" as const, label: `Trades (${trades.length})` },
-              { id: "staking" as const, label: `Staking (${staking.length})` },
-            ]}
-            value={tab}
-            onChange={setTab}
-          />
-          <p className="page-note">
-            {tab === "deployed"
-              ? "Coins this wallet launched on LOOTING."
-              : tab === "trades"
-                ? "Buys and sells on LOOTING tokens."
-                : `Vault stakes, claims, and ${formatStakingTokens(stakingRewards)} rewards earned.`}
-          </p>
+          <div className="page-title-row">
+            <SlidingTabs
+              ariaLabel="Account activity"
+              tone="quiet"
+              items={[
+                { id: "deployed" as const, label: `Deployed (${deployed.length})` },
+                { id: "trades" as const, label: `Trades (${trades.length})` },
+                { id: "staking" as const, label: `Staking (${staking.length})` },
+              ]}
+              value={tab}
+              onChange={setTab}
+            />
+            <PageInfo
+              tip={
+                tab === "deployed"
+                  ? "Coins this wallet launched on LOOTING."
+                  : tab === "trades"
+                    ? "Buys and sells on LOOTING tokens."
+                    : `Vault stakes, claims, and ${formatStakingTokens(stakingRewards)} rewards earned.`
+              }
+              label="Section info"
+            />
+          </div>
         </div>
 
         <div key={tab} className="account-board page-swap">
@@ -208,8 +215,10 @@ function DeployedBoard({ rows }: { rows: LaunchWithStats[] }) {
   if (rows.length === 0) {
     return (
       <div className="sheet account-blank">
-        <p className="account-blank-title">No launches yet</p>
-        <p className="page-note">Tokens you deploy will show up here with curve progress and fee settings.</p>
+        <div className="page-title-row">
+          <p className="account-blank-title">No launches yet</p>
+          <PageInfo tip="Tokens you deploy will show up here with curve progress and fee settings." label="Launches" />
+        </div>
         <Link href="/create" className="claim-btn claim-all">
           Launch a coin
         </Link>
@@ -307,8 +316,10 @@ function TradesBoard({ rows }: { rows: WalletTrade[] }) {
   if (rows.length === 0) {
     return (
       <div className="sheet account-blank">
-        <p className="account-blank-title">No trades yet</p>
-        <p className="page-note">Buys and sells on LOOTING tokens will show up here with XP.</p>
+        <div className="page-title-row">
+          <p className="account-blank-title">No trades yet</p>
+          <PageInfo tip="Buys and sells on LOOTING tokens will show up here with XP." label="Trades" />
+        </div>
         <Link href="/" className="claim-btn claim-all">
           Explore launches
         </Link>
@@ -399,8 +410,10 @@ function StakingBoard({ rows }: { rows: StakingHistoryRow[] }) {
   if (rows.length === 0) {
     return (
       <div className="sheet account-blank">
-        <p className="account-blank-title">No staking history yet</p>
-        <p className="page-note">Stakes, claims, and rewards from public vaults will show up here.</p>
+        <div className="page-title-row">
+          <p className="account-blank-title">No staking history yet</p>
+          <PageInfo tip="Stakes, claims, and rewards from public vaults will show up here." label="Staking" />
+        </div>
         <Link href="/staking" className="claim-btn claim-all">
           Browse staking
         </Link>
@@ -496,8 +509,10 @@ function Empty({ onConnect }: { onConnect: () => void }) {
   return (
     <section className="sheet account-empty">
       <p className="account-kicker">Season 01</p>
-      <p className="account-empty-title">Connect to see your account</p>
-      <p className="page-note">Deployed tokens, tier, boxes, trades, and staking on LOOTING show up here.</p>
+      <div className="page-title-row">
+        <p className="account-empty-title">Connect to see your account</p>
+        <PageInfo tip="Deployed tokens, tier, boxes, trades, and staking on LOOTING show up here." label="About account" />
+      </div>
       <button type="button" className="claim-btn claim-all" onClick={onConnect}>
         Connect
       </button>

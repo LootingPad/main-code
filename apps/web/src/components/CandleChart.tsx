@@ -2,49 +2,34 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  CandlestickSeries,
+  AreaSeries,
   ColorType,
   CrosshairMode,
-  HistogramSeries,
   createChart,
-  type CandlestickData,
-  type HistogramData,
   type IChartApi,
   type ISeriesApi,
+  type LineData,
   type UTCTimestamp,
 } from "lightweight-charts";
 import { formatUsd } from "@/lib/format";
 import type { TrenchCandle, TrenchTick } from "@/lib/trenches";
 
-const UP = "#2ebd85";
-const DOWN = "#f6465d";
+const UP = "#ccff00";
+const DOWN = "#ff4d4d";
 const ZONE = new Date().getTimezoneOffset() * 60;
-
-const FRAMES = [
-  { id: "1s", ms: 1_000, bars: 90 },
-  { id: "30s", ms: 30_000, bars: 80 },
-  { id: "1m", ms: 60_000, bars: 80 },
-  { id: "1H", ms: 3_600_000, bars: 72 },
-  { id: "4H", ms: 14_400_000, bars: 60 },
-  { id: "1D", ms: 86_400_000, bars: 48 },
-] as const;
-
-type FrameId = (typeof FRAMES)[number]["id"];
-type Hover = { o: number; h: number; l: number; c: number; v: number };
-
-function frameForHistory(ticks: TrenchTick[]): FrameId {
-  if (ticks.length < 2) return "1s";
-  const span = Math.max(...ticks.map((tick) => tick.t)) - Math.min(...ticks.map((tick) => tick.t));
-  if (span <= 8 * 60_000) return "1s";
-  if (span <= 30 * 60_000) return "30s";
-  if (span <= 4 * 3_600_000) return "1m";
-  if (span <= 36 * 3_600_000) return "1H";
-  if (span <= 8 * 24 * 3_600_000) return "4H";
-  return "1D";
-}
+/** Bucket size for full-history line — keeps ~120 points max. */
+const BUCKET_TARGET = 120;
 
 function chartTime(ms: number): UTCTimestamp {
   return (Math.floor(ms / 1000) - ZONE) as UTCTimestamp;
+}
+
+function bucketMs(ticks: TrenchTick[]): number {
+  if (ticks.length < 2) return 1_000;
+  const times = ticks.map((tick) => tick.t);
+  const span = Math.max(...times) - Math.min(...times);
+  if (span <= 0) return 1_000;
+  return Math.max(1_000, Math.ceil(span / BUCKET_TARGET));
 }
 
 function aggregate(ticks: TrenchTick[], frameMs: number): TrenchCandle[] {
@@ -68,47 +53,34 @@ function aggregate(ticks: TrenchTick[], frameMs: number): TrenchCandle[] {
   return [...bars.values()].sort((a, b) => a.t - b.t);
 }
 
-function toSeries(bars: TrenchCandle[]) {
-  const candles: CandlestickData[] = [];
-  const volume: HistogramData[] = [];
+function toLine(bars: TrenchCandle[]): LineData[] {
+  const line: LineData[] = [];
   for (const bar of bars) {
     const time = chartTime(bar.t);
-    const rising = bar.c >= bar.o;
-    const last = candles[candles.length - 1];
+    const last = line[line.length - 1];
     if (last && last.time === time) {
-      last.high = Math.max(last.high, bar.h);
-      last.low = Math.min(last.low, bar.l);
-      last.close = bar.c;
-      const bin = volume[volume.length - 1];
-      if (bin) bin.value += bar.v;
+      last.value = bar.c;
       continue;
     }
-    candles.push({ time, open: bar.o, high: bar.h, low: bar.l, close: bar.c });
-    volume.push({
-      time,
-      value: bar.v,
-      color: rising ? "rgba(46, 189, 133, 0.45)" : "rgba(246, 70, 93, 0.45)",
-    });
+    line.push({ time, value: bar.c });
   }
-  return { candles, volume };
+  return line;
 }
 
-function sameSeries(prev: CandlestickData[], next: CandlestickData[], prevVolume: HistogramData[], nextVolume: HistogramData[]) {
-  if (prev.length !== next.length || prevVolume.length !== nextVolume.length) return false;
+function sameLine(prev: LineData[], next: LineData[]) {
+  if (prev.length !== next.length) return false;
   for (let i = 0; i < next.length; i += 1) {
     const before = prev[i];
     const after = next[i];
-    if (!before || !after || before.time !== after.time || before.open !== after.open || before.high !== after.high || before.low !== after.low || before.close !== after.close) {
-      return false;
-    }
+    if (!before || !after || before.time !== after.time || before.value !== after.value) return false;
   }
-  const left = prevVolume[prevVolume.length - 1];
-  const right = nextVolume[nextVolume.length - 1];
-  return (left?.time ?? 0) === (right?.time ?? 0) && (left?.value ?? 0) === (right?.value ?? 0);
+  return true;
 }
 
-function canAppend(prev: CandlestickData[], next: CandlestickData[]) {
-  if (prev.length === 0 || next.length === 0 || next.length < prev.length || next.length > prev.length + 1) return false;
+function canAppend(prev: LineData[], next: LineData[]) {
+  if (prev.length === 0 || next.length === 0 || next.length < prev.length || next.length > prev.length + 1) {
+    return false;
+  }
   if (next[0]?.time !== prev[0]?.time) return false;
   for (let i = 0; i < prev.length - 1; i += 1) {
     if (next[i]?.time !== prev[i]?.time) return false;
@@ -116,6 +88,11 @@ function canAppend(prev: CandlestickData[], next: CandlestickData[]) {
   return (next[next.length - 1]?.time ?? 0) >= (prev[prev.length - 1]?.time ?? 0);
 }
 
+function fitFull(chart: IChartApi) {
+  chart.timeScale().fitContent();
+}
+
+/** Fixed full-history area chart — no timeframe tabs, no pan/zoom. */
 export function CandleChart({
   symbol,
   ticks,
@@ -125,52 +102,31 @@ export function CandleChart({
   spot?: number;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
+  const tipRef = useRef<HTMLElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
-  const candleRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
-  const volumeRef = useRef<ISeriesApi<"Histogram"> | null>(null);
-  const countRef = useRef(0);
-  const followRef = useRef(true);
+  const lineRef = useRef<ISeriesApi<"Area"> | null>(null);
+  const placeTipRef = useRef<(() => void) | null>(null);
   const anchorRef = useRef(true);
-  const prevRef = useRef<CandlestickData[]>([]);
-  const prevVolumeRef = useRef<HistogramData[]>([]);
-  const seriesRef = useRef(toSeries([]));
-  const frameBarsRef = useRef(90);
-  const picked = useRef(false);
-  const [frameId, setFrameId] = useState<FrameId>("1m");
-  const [hover, setHover] = useState<Hover | null>(null);
-  const [following, setFollowing] = useState(true);
-  const frame = FRAMES.find((item) => item.id === frameId) ?? FRAMES[1];
-  frameBarsRef.current = frame.bars;
+  const prevRef = useRef<LineData[]>([]);
+  const seriesRef = useRef<LineData[]>([]);
+  const [hoverPrice, setHoverPrice] = useState<number | null>(null);
 
-  const bars = useMemo(() => aggregate(ticks, frame.ms), [ticks, frame.ms]);
+  const frameMs = useMemo(() => bucketMs(ticks), [ticks]);
+  const bars = useMemo(() => aggregate(ticks, frameMs), [ticks, frameMs]);
   const last = bars[bars.length - 1];
   const first = bars[0];
-  const session = first && last
-    ? {
-        o: first.o,
-        h: Math.max(...bars.map((bar) => bar.h)),
-        l: Math.min(...bars.map((bar) => bar.l)),
-        c: last.c,
-        v: 0,
-      }
-    : null;
-  const active = hover ?? session;
-  const base = hover ? hover.o : (session?.o ?? 0);
-  const delta = active ? active.c - base : 0;
-  const pct = base > 0 ? (delta / base) * 100 : 0;
-  const volume = hover ? hover.v : bars.reduce((sum, bar) => sum + bar.v, 0);
-
-  useEffect(() => {
-    if (picked.current || ticks.length === 0) return;
-    setFrameId(frameForHistory(ticks));
-  }, [ticks]);
+  const open = first?.o ?? 0;
+  const price = hoverPrice ?? last?.c ?? 0;
+  const delta = price - open;
+  const pct = open > 0 ? (delta / open) * 100 : 0;
+  const volume = bars.reduce((sum, bar) => sum + bar.v, 0);
+  const up = delta >= 0;
 
   useEffect(() => {
     anchorRef.current = true;
     prevRef.current = [];
-    prevVolumeRef.current = [];
-    setHover(null);
-  }, [frameId, symbol]);
+    setHoverPrice(null);
+  }, [symbol]);
 
   useEffect(() => {
     const host = hostRef.current;
@@ -179,176 +135,140 @@ export function CandleChart({
       autoSize: true,
       layout: {
         background: { type: ColorType.Solid, color: "transparent" },
-        textColor: "#8d8d8d",
+        textColor: "#9b9b9b",
         fontSize: 11,
         attributionLogo: false,
       },
       grid: {
-        vertLines: { color: "rgba(255,255,255,0.04)" },
+        vertLines: { color: "rgba(255,255,255,0.06)" },
         horzLines: { color: "rgba(255,255,255,0.06)" },
       },
       crosshair: {
-        mode: CrosshairMode.Normal,
-        vertLine: { color: "rgba(255,255,255,0.28)", labelBackgroundColor: "#2a2e34" },
-        horzLine: { color: "rgba(255,255,255,0.28)", labelBackgroundColor: "#2a2e34" },
+        mode: CrosshairMode.Magnet,
+        vertLine: { color: "rgba(255,255,255,0.22)", labelBackgroundColor: "#222222" },
+        horzLine: { color: "rgba(255,255,255,0.22)", labelBackgroundColor: "#222222" },
       },
       rightPriceScale: { borderVisible: false },
       timeScale: {
         borderVisible: false,
         timeVisible: true,
         secondsVisible: true,
-        rightOffset: 3,
-        shiftVisibleRangeOnNewBar: true,
+        rightOffset: 0,
+        fixLeftEdge: true,
+        fixRightEdge: true,
+        lockVisibleTimeRangeOnResize: true,
+        shiftVisibleRangeOnNewBar: false,
       },
+      handleScroll: false,
+      handleScale: false,
     });
-    const candle = chart.addSeries(CandlestickSeries, {
-      upColor: UP,
-      downColor: DOWN,
-      borderUpColor: UP,
-      borderDownColor: DOWN,
-      wickUpColor: UP,
-      wickDownColor: DOWN,
-      priceLineColor: UP,
-      priceFormat: { type: "custom", formatter: formatUsd, minMove: 0.01 },
-    });
-    const volumeSeries = chart.addSeries(HistogramSeries, {
-      priceScaleId: "",
+    const area = chart.addSeries(AreaSeries, {
+      lineColor: UP,
+      topColor: "rgba(204, 255, 0, 0.22)",
+      bottomColor: "rgba(204, 255, 0, 0)",
+      lineWidth: 2,
       priceLineVisible: false,
       lastValueVisible: false,
-      priceFormat: { type: "volume" },
+      crosshairMarkerVisible: true,
+      crosshairMarkerRadius: 4,
+      priceFormat: { type: "custom", formatter: formatUsd, minMove: 0.01 },
     });
-    candle.priceScale().applyOptions({ scaleMargins: { top: 0.08, bottom: 0.24 } });
-    volumeSeries.priceScale().applyOptions({ scaleMargins: { top: 0.78, bottom: 0 } });
+    area.priceScale().applyOptions({ scaleMargins: { top: 0.08, bottom: 0.06 } });
     chart.subscribeCrosshairMove((param) => {
-      const row = param.seriesData.get(candle);
-      const bin = param.seriesData.get(volumeSeries);
-      if (!param.point || !row || !("open" in row)) {
-        setHover(null);
+      const row = param.seriesData.get(area);
+      if (!param.point || !row || !("value" in row)) {
+        setHoverPrice(null);
         return;
       }
-      const vol = bin && "value" in bin ? bin.value : 0;
-      setHover({ o: row.open, h: row.high, l: row.low, c: row.close, v: vol });
-    });
-    chart.timeScale().subscribeVisibleLogicalRangeChange((range) => {
-      if (!range) return;
-      const atEnd = range.to >= countRef.current - 1;
-      if (atEnd === followRef.current) return;
-      followRef.current = atEnd;
-      chart.timeScale().applyOptions({ shiftVisibleRangeOnNewBar: atEnd });
-      setFollowing(atEnd);
+      setHoverPrice(row.value);
     });
     chartRef.current = chart;
-    candleRef.current = candle;
-    volumeRef.current = volumeSeries;
+    lineRef.current = area;
     const seeded = seriesRef.current;
-    if (seeded.candles.length > 0) {
-      candle.setData(seeded.candles);
-      volumeSeries.setData(seeded.volume);
-      countRef.current = seeded.candles.length;
-      const from = Math.max(0, seeded.candles.length - frameBarsRef.current);
-      chart.timeScale().setVisibleLogicalRange({ from, to: seeded.candles.length + 2 });
+    if (seeded.length > 0) {
+      area.setData(seeded);
+      fitFull(chart);
       anchorRef.current = false;
-      prevRef.current = seeded.candles;
-      prevVolumeRef.current = seeded.volume;
+      prevRef.current = seeded;
     }
+    const placeTip = () => {
+      const tip = tipRef.current;
+      const lastPoint = seriesRef.current[seriesRef.current.length - 1];
+      if (!tip || !lastPoint) {
+        if (tip) tip.style.opacity = "0";
+        return;
+      }
+      const x = chart.timeScale().timeToCoordinate(lastPoint.time);
+      const y = area.priceToCoordinate(lastPoint.value);
+      if (x == null || y == null) {
+        tip.style.opacity = "0";
+        return;
+      }
+      tip.dataset.down = lastPoint.value < (seriesRef.current[0]?.value ?? lastPoint.value) ? "1" : "0";
+      tip.style.opacity = "1";
+      tip.style.transform = `translate(${x}px, ${y}px) translate(-50%, -50%)`;
+    };
+    placeTipRef.current = placeTip;
+    chart.timeScale().subscribeVisibleLogicalRangeChange(placeTip);
+    const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(placeTip) : null;
+    ro?.observe(host);
+    requestAnimationFrame(placeTip);
     return () => {
+      ro?.disconnect();
+      placeTipRef.current = null;
       chart.remove();
       chartRef.current = null;
-      candleRef.current = null;
-      volumeRef.current = null;
+      lineRef.current = null;
     };
   }, []);
 
   useEffect(() => {
-    const next = toSeries(bars);
+    const next = toLine(bars);
     seriesRef.current = next;
     const chart = chartRef.current;
-    const candle = candleRef.current;
-    const volumeSeries = volumeRef.current;
-    if (!chart || !candle || !volumeSeries) return;
-    if (sameSeries(prevRef.current, next.candles, prevVolumeRef.current, next.volume)) return;
-    chart.applyOptions({ timeScale: { secondsVisible: frame.ms < 60_000 } });
-    const lastCandle = next.candles[next.candles.length - 1];
-    if (lastCandle) candle.applyOptions({ priceLineColor: lastCandle.close >= lastCandle.open ? UP : DOWN });
-    countRef.current = next.candles.length;
-    if (next.candles.length === 0) {
-      candle.setData([]);
-      volumeSeries.setData([]);
-      prevRef.current = [];
-      prevVolumeRef.current = [];
+    const area = lineRef.current;
+    if (!chart || !area) return;
+    if (sameLine(prevRef.current, next)) {
+      placeTipRef.current?.();
       return;
     }
-    if (!anchorRef.current && canAppend(prevRef.current, next.candles)) {
-      const lastCandle = next.candles[next.candles.length - 1];
-      const lastVolume = next.volume[next.volume.length - 1];
-      if (lastCandle) candle.update(lastCandle);
-      if (lastVolume) volumeSeries.update(lastVolume);
-    } else {
-      const range = chart.timeScale().getVisibleRange();
-      candle.setData(next.candles);
-      volumeSeries.setData(next.volume);
-      if (anchorRef.current || !range) {
-        const from = Math.max(0, next.candles.length - frame.bars);
-        chart.timeScale().setVisibleLogicalRange({ from, to: next.candles.length + 2 });
-        anchorRef.current = false;
-        followRef.current = true;
-        chart.timeScale().applyOptions({ shiftVisibleRangeOnNewBar: true });
-        setFollowing(true);
-      } else if (followRef.current) {
-        chart.timeScale().scrollToRealTime();
-      } else {
-        chart.timeScale().setVisibleRange(range);
-      }
+    chart.applyOptions({ timeScale: { secondsVisible: frameMs < 60_000 } });
+    const tip = next[next.length - 1];
+    const openValue = next[0]?.value ?? 0;
+    const rising = tip ? tip.value >= openValue : true;
+    area.applyOptions({
+      lineColor: rising ? UP : DOWN,
+      topColor: rising ? "rgba(204, 255, 0, 0.22)" : "rgba(255, 77, 77, 0.22)",
+      bottomColor: rising ? "rgba(204, 255, 0, 0)" : "rgba(255, 77, 77, 0)",
+    });
+    if (next.length === 0) {
+      area.setData([]);
+      prevRef.current = [];
+      placeTipRef.current?.();
+      return;
     }
-    prevRef.current = next.candles;
-    prevVolumeRef.current = next.volume;
-  }, [bars, frame.bars, frame.ms]);
+    if (!anchorRef.current && canAppend(prevRef.current, next)) {
+      const lastPoint = next[next.length - 1];
+      if (lastPoint) area.update(lastPoint);
+    } else {
+      area.setData(next);
+      anchorRef.current = false;
+    }
+    fitFull(chart);
+    prevRef.current = next;
+    requestAnimationFrame(() => placeTipRef.current?.());
+  }, [bars, frameMs]);
+
+  const empty = !last;
 
   return (
-    <div className="trade-chart">
-      <div className="chart-frames">
-        <div role="tablist" aria-label="Chart interval">
-          {FRAMES.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              role="tab"
-              aria-selected={item.id === frameId}
-              className={item.id === frameId ? "is-on" : ""}
-              onClick={() => {
-                picked.current = true;
-                setFrameId(item.id);
-              }}
-            >
-              {item.id}
-            </button>
-          ))}
-        </div>
-        <button
-          type="button"
-          className={following ? "chart-live" : "chart-live is-back"}
-          onClick={() => {
-            followRef.current = true;
-            setFollowing(true);
-            chartRef.current?.timeScale().applyOptions({ shiftVisibleRangeOnNewBar: true });
-            chartRef.current?.timeScale().scrollToRealTime();
-          }}
-        >
-          <i />
-          {following ? "Live" : "Latest"}
-        </button>
-      </div>
-      {active ? (
+    <div className={`trade-chart${empty ? " is-empty" : ""}`}>
+      {!empty ? (
         <>
           <div className="chart-ohlc">
-            <b>
-              {symbol} · {frame.id}
-            </b>
-            <span>O {formatUsd(active.o)}</span>
-            <span className="is-up">H {formatUsd(active.h)}</span>
-            <span className="is-down">L {formatUsd(active.l)}</span>
-            <span>C {formatUsd(active.c)}</span>
-            <span className={delta >= 0 ? "is-up" : "is-down"}>
+            <b>{symbol}</b>
+            <span>{formatUsd(price)}</span>
+            <span className={up ? "is-up" : "is-down"}>
               {delta >= 0 ? "+" : ""}
               {formatUsd(delta)} ({delta >= 0 ? "+" : ""}
               {pct.toFixed(2)}%)
@@ -356,10 +276,14 @@ export function CandleChart({
           </div>
           <div className="chart-volume-label">Volume {formatUsd(volume)}</div>
         </>
-      ) : (
-        <p className="ohlc-empty">Waiting for trades</p>
-      )}
-      <div ref={hostRef} className="chart-host" />
+      ) : null}
+      <div className="chart-host-wrap">
+        <div ref={hostRef} className="chart-host" hidden={empty} />
+        <span className="chart-watermark" aria-hidden>
+          Lootingpad.com
+        </span>
+        <i ref={tipRef} className="chart-tip" aria-hidden />
+      </div>
     </div>
   );
 }

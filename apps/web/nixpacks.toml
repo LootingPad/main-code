@@ -1,0 +1,6 @@
+providers = ["node"]
+
+[variables]
+NIXPACKS_NODE_VERSION = "20"
+# Next build needs typescript / types from devDependencies
+NPM_CONFIG_PRODUCTION = "false"

@@ -1,10 +1,11 @@
 "use client";
 
 import Link from "next/link";
-import { FormEvent, RefObject, useEffect, useRef } from "react";
-import { getLaunches, getStakingEvents } from "@/lib/api";
+import { FormEvent, RefObject, useEffect, useMemo, useRef } from "react";
+import { getLaunch, getLaunches, getStakingEvents } from "@/lib/api";
 import { formatUsd } from "@/lib/format";
 import { eventAprRange, formatStakingDate, formatStakingTokens } from "@/lib/staking-events";
+import { getTrenchToken, trenchToLaunch } from "@/lib/trenches";
 import type { LaunchWithStats, StakingEvent } from "@/lib/types";
 import { useAsyncData } from "@/lib/use-async-data";
 import { SearchIcon } from "./Icons";
@@ -16,12 +17,33 @@ export type SearchAge = "all" | "24h" | "7d";
 export type SearchPhase = "all" | "curve" | "graduated";
 export type SearchMenu = "sort" | "age" | "phase" | null;
 
+const ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
+
 function ageHours(age: string) {
   const value = Number.parseFloat(age);
+  if (!Number.isFinite(value)) return 999;
+  if (age.endsWith("s")) return value / 3600;
   if (age.endsWith("m")) return value / 60;
   if (age.endsWith("h")) return value;
   if (age.endsWith("d")) return value * 24;
   return 999;
+}
+
+async function lookupTokenByAddress(raw: string): Promise<LaunchWithStats | null> {
+  const address = raw.trim();
+  if (!ADDRESS_RE.test(address)) return null;
+  try {
+    return await getLaunch(address);
+  } catch {
+    /* try trench */
+  }
+  try {
+    const trench = await getTrenchToken(address);
+    if (trench?.pair) return trenchToLaunch(trench.pair);
+  } catch {
+    /* miss */
+  }
+  return null;
 }
 
 export function ShellSearchModal({
@@ -80,6 +102,20 @@ export function ShellSearchModal({
   const launches = launchesProp ?? fetchedLaunches;
   const stakingEvents = stakingEventsProp ?? fetchedStaking;
 
+  const needle = (typeof query === "string" ? query : "").trim().toLowerCase();
+  const addressQuery = ADDRESS_RE.test(needle) ? needle : "";
+  const { data: addressHit } = useAsyncData(() => lookupTokenByAddress(addressQuery), [addressQuery], {
+    initial: null as LaunchWithStats | null,
+    enabled: Boolean(addressQuery) && category !== "staking",
+  });
+
+  const searchLaunches = useMemo(() => {
+    if (!addressHit) return launches;
+    const key = addressHit.address.toLowerCase();
+    if (launches.some((coin) => coin.address.toLowerCase() === key)) return launches;
+    return [addressHit, ...launches];
+  }, [launches, addressHit]);
+
   useEffect(() => {
     function onKey(event: KeyboardEvent) {
       if (event.key !== "Escape") return;
@@ -93,11 +129,10 @@ export function ShellSearchModal({
     return () => window.removeEventListener("keydown", onKey);
   }, [menuOpen, onClose, setMenuOpen]);
 
-  const needle = (typeof query === "string" ? query : "").trim().toLowerCase();
   const coinHits =
     category === "staking"
       ? []
-      : launches
+      : searchLaunches
           .map((coin) => ({ kind: "token" as const, coin, stats: coin.stats }))
           .filter(({ coin, stats }) => {
             const hours = ageHours(stats.age);
@@ -105,13 +140,20 @@ export function ShellSearchModal({
             if (age === "7d" && hours > 24 * 7) return false;
             if (phase !== "all" && coin.phase !== phase) return false;
             if (!needle) return true;
+            const addr = coin.address.toLowerCase();
             return (
               coin.name.toLowerCase().includes(needle) ||
               coin.symbol.toLowerCase().includes(needle) ||
-              coin.address.toLowerCase().includes(needle)
+              addr.includes(needle) ||
+              (ADDRESS_RE.test(needle) && addr === needle)
             );
           })
           .sort((a, b) => {
+            if (ADDRESS_RE.test(needle)) {
+              const aExact = a.coin.address.toLowerCase() === needle ? 1 : 0;
+              const bExact = b.coin.address.toLowerCase() === needle ? 1 : 0;
+              if (aExact !== bExact) return bExact - aExact;
+            }
             if (sortBy === "mcap") return b.coin.marketCap - a.coin.marketCap;
             if (sortBy === "volume") return b.stats.volume24h - a.stats.volume24h;
             if (sortBy === "newest") return ageHours(a.stats.age) - ageHours(b.stats.age);
@@ -163,8 +205,8 @@ export function ShellSearchModal({
               setQuery(event.target.value);
               setPage(0);
             }}
-            placeholder="Search tokens or staking pools"
-            aria-label="Search tokens or staking pools"
+            placeholder="Search name, ticker, or 0x address"
+            aria-label="Search name, ticker, or 0x address"
           />
           <button type="button" className="search-modal-close" aria-label="Close" onClick={onClose}>
             ×
@@ -261,7 +303,12 @@ export function ShellSearchModal({
                   className="search-hit"
                   onClick={onClose}
                 >
-                  <TokenLogo symbol={hit.coin.symbol} size={32} />
+                  <TokenLogo
+                    symbol={hit.coin.symbol}
+                    size={32}
+                    src={hit.coin.logoUrl}
+                    address={hit.coin.address}
+                  />
                   <span>
                     <b>{hit.coin.name}</b>
                     <em>

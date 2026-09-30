@@ -5,6 +5,7 @@ import { getFees, getLaunches, getWalletDevLocks } from "@/lib/api";
 import { DEV_LOCK_FEE_ETH } from "@/lib/fees";
 import type { Cadence, DevLock, DevLockMode, Launch } from "@/lib/types";
 import { useAsyncData } from "@/lib/use-async-data";
+import { PageFlash, PageTitle } from "./PageInfo";
 import { Pager } from "./Pager";
 import { SlidingTabs } from "./SlidingTabs";
 import { TokenLogo } from "./TokenLogo";
@@ -12,7 +13,6 @@ import { useWallet } from "./Wallet";
 
 const DAY = 24 * 60 * 60 * 1000;
 const LOCKS_PER_PAGE = 4;
-const DEMO_BALANCE = 10_000_000;
 
 const TIME_PRESETS = [
   { id: "30", label: "30 days", days: 30 },
@@ -412,7 +412,7 @@ function LockShareCard({
             Share image
           </button>
         </div>
-        {note ? <p className="page-note">{note}</p> : null}
+        {note ? <PageFlash note={note} /> : null}
       </div>
     </div>
   );
@@ -539,7 +539,7 @@ export function DevLock() {
   }, [connected, apiLocks, localLocks, lockEdits, hiddenLockIds]);
 
   const coin = coins.find((item) => item.symbol === symbol) ?? coins[0];
-  const balance = coin ? (balances[coin.symbol] ?? DEMO_BALANCE) : 0;
+  const balance = coin ? (balances[coin.symbol] ?? 0) : 0;
   const parsed = Number(amount.replace(/,/g, ""));
   const value = Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
 
@@ -619,52 +619,15 @@ export function DevLock() {
       else setNotice("Enter an amount above 0.");
       return;
     }
-    const next: Lock = {
-      id: `local-${coin.symbol}-${Date.now()}`,
-      address: coin.address,
-      symbol: coin.symbol,
-      name: coin.name,
-      mode,
-      amount: value,
-      claimed: 0,
-      start: now,
-      cliff: cliffAt,
-      unlock: unlockAt,
-      cadence,
-    };
-    setLocalLocks((current) => [next, ...current]);
-    setBalances((current) => ({ ...current, [coin.symbol]: (current[coin.symbol] ?? DEMO_BALANCE) - value }));
-    setAmount("");
-    setLockPage(1);
-    setNotice(
-      mode === "time"
-        ? `Demo only — on-chain lock not wired. Preview: locked ${formatTokens(value)} ${coin.symbol} until ${formatDate(unlockAt)}.`
-        : `Demo only — on-chain lock not wired. Preview: vesting ${formatTokens(value)} ${coin.symbol} through ${formatDate(unlockAt)}.`,
-    );
+    setNotice("On-chain Dev Lock is not wired yet — no demo locks are created.");
   };
 
-  const claim = (lock: Lock) => {
-    const payout = claimableAmount(lock);
-    if (payout <= 0) return;
-    setBalances((current) => ({ ...current, [lock.symbol]: (current[lock.symbol] ?? DEMO_BALANCE) + payout }));
-    const claimed = lock.claimed + payout;
-    const next = claimed >= lock.amount - 1 ? null : { ...lock, claimed };
-    if (lock.id.startsWith("local-")) {
-      setLocalLocks((current) => {
-        if (!next) return current.filter((item) => item.id !== lock.id);
-        return current.map((item) => (item.id === lock.id ? next : item));
-      });
-    } else if (!next) {
-      setHiddenLockIds((current) => [...current, lock.id]);
-      setLockEdits((current) => {
-        const copy = { ...current };
-        delete copy[lock.id];
-        return copy;
-      });
-    } else {
-      setLockEdits((current) => ({ ...current, [lock.id]: next }));
+  const claim = (_lock: Lock) => {
+    if (!connected) {
+      connect();
+      return;
     }
-    setNotice(`Demo only — on-chain claim not wired. Preview: claimed ${formatTokens(payout)} ${lock.symbol}.`);
+    setNotice("On-chain claim is not wired yet.");
   };
 
   const schedule = scheduleParts(mode, cliffDays, lengthDays);
@@ -672,10 +635,9 @@ export function DevLock() {
   return (
     <div className="devlock-page">
       <div className="page-head">
-        <div>
-          <h1 className="explore-title">Dev Lock</h1>
-          <p className="page-note">Lock tokens from coins you launched. Time-based unlocks once. Vesting releases on a schedule.</p>
-        </div>
+        <PageTitle tip="Lock tokens from coins you launched. Time-based unlocks once. Vesting releases on a schedule. DevLock contract is not deployed yet — create/claim stay off until the address is set.">
+          Dev Lock
+        </PageTitle>
         <SlidingTabs
           items={[
             { id: "time", label: "Time-based" },
@@ -727,7 +689,7 @@ export function DevLock() {
                         <b>${item.symbol}</b>
                         <em>{item.name}</em>
                       </span>
-                      <strong>{formatTokens(balances[item.symbol] ?? DEMO_BALANCE)}</strong>
+                      <strong>{formatTokens(balances[item.symbol] ?? 0)}</strong>
                     </button>
                   ))}
                 </div>
@@ -884,7 +846,7 @@ export function DevLock() {
                 <span>Wallet</span>
                 <strong>
                   {formatTokens(
-                    coins.reduce((sum, item) => sum + (balances[item.symbol] ?? DEMO_BALANCE), 0) ||
+                    coins.reduce((sum, item) => sum + (balances[item.symbol] ?? 0), 0) ||
                       Object.values(balances).reduce((sum, item) => sum + item, 0),
                   )}
                 </strong>

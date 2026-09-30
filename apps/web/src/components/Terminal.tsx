@@ -2,24 +2,73 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { useRouter } from "next/navigation";
 import { useAppKitNetwork, useAppKitProvider } from "@reown/appkit/react";
-import { ApiError, emptyStats, getFees, getLaunchHolders, getLaunchTrades, prepareTrade } from "@/lib/api";
+import {
+  ApiError,
+  claimCreatorFee,
+  emptyStats,
+  getFees,
+  getLaunchHolders,
+  getLaunchTrades,
+  getWalletLuckyBoxes,
+  prepareTrade,
+  confirmTrade,
+} from "@/lib/api";
 import { robinhoodChain } from "@/lib/chains";
 import { DRAFT_KEY } from "@/lib/draft";
-import { ETH_USD, TRADE_FEE_USD } from "@/lib/fees";
+import { feePoolsFromTaxEth, feePoolsFromVolumeUsd, TRADE_FEE_USD } from "@/lib/fees";
+import { PageFlash, PageInfo } from "@/components/PageInfo";
 import { formatPrice, formatUsd, shortAddress } from "@/lib/format";
 import { PONS_LAUNCH_WINDOW } from "@/lib/launch-window";
-import { getTrenchToken, trenchHolders, trenchTicks, trenchToLaunch, trenchTrades, type TrenchTick } from "@/lib/trenches";
-import type { Holder, Launch, LaunchWithStats, MarketStats, TokenTrade } from "@/lib/types";
+import { getTrenchToken, setTrenchEthUsd, trenchHolders, trenchTicks, trenchToLaunch, trenchTrades, avgEntryFromTrades, type TrenchTick } from "@/lib/trenches";
+import type { Holder, Launch, LaunchWithStats, LuckyBox, MarketStats, TokenTrade } from "@/lib/types";
 import { useAsyncData } from "@/lib/use-async-data";
 import { GiftIcon, WalletIcon } from "./Icons";
 import { Pager } from "./Pager";
 import { SlidingTabs } from "./SlidingTabs";
 import { CandleChart } from "./CandleChart";
-import { Sparkline } from "./Sparkline";
 import { TokenLogo } from "./TokenLogo";
 import { useWallet } from "./Wallet";
-import { createPublicClient, http, type Address, type EIP1193Provider, type Hash, type Hex } from "viem";
+import { createPublicClient, formatUnits, http, type Address, type EIP1193Provider, type Hash, type Hex } from "viem";
+
+const erc20BalanceAbi = [
+  {
+    type: "function",
+    name: "balanceOf",
+    stateMutability: "view",
+    inputs: [{ name: "account", type: "address" }],
+    outputs: [{ type: "uint256" }],
+  },
+  {
+    type: "function",
+    name: "decimals",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ type: "uint8" }],
+  },
+] as const;
+
+function feeClaimKey(kind: "creator" | "pool", token: string, wallet: string) {
+  return `looting-fee-claim:${kind}:${token.toLowerCase()}:${wallet.toLowerCase()}`;
+}
+
+function boxClaimable(box: LuckyBox) {
+  return box.status === "unopened" || box.status === "opened";
+}
+
+function boxHolding(box: LuckyBox) {
+  return box.status === "holding";
+}
+
+function boxForLaunch(box: LuckyBox, launch: { address: string; symbol: string }) {
+  const key = box.token.toLowerCase();
+  return (
+    key === launch.address.toLowerCase() ||
+    key === launch.symbol.toLowerCase() ||
+    (box.symbol != null && box.symbol.toLowerCase() === launch.symbol.toLowerCase())
+  );
+}
 
 function resolveStats(launch: Launch | LaunchWithStats, initialStats?: MarketStats): MarketStats {
   if (initialStats) return initialStats;
@@ -35,6 +84,7 @@ export function Terminal({
   holders: seededHolders,
   trades: seededTrades,
   ticks: seededTicks,
+  feePending = false,
 }: {
   launch: Launch | LaunchWithStats;
   initialStats?: MarketStats;
@@ -42,6 +92,7 @@ export function Terminal({
   holders?: Holder[];
   trades?: TokenTrade[];
   ticks?: TrenchTick[];
+  feePending?: boolean;
   meta?: {
     website?: string;
     twitter?: string;
@@ -60,6 +111,7 @@ export function Terminal({
   const [chainTrades, setChainTrades] = useState(seededTrades ?? []);
   const [ticks, setTicks] = useState(seededTicks ?? []);
   const launch = chain ? shown : initialLaunch;
+  const router = useRouter();
   const { connected, address, connect } = useWallet();
   const { walletProvider } = useAppKitProvider<EIP1193Provider>("eip155");
   const { chainId, switchNetwork } = useAppKitNetwork();
@@ -68,25 +120,44 @@ export function Terminal({
   const { data: fees } = useAsyncData(() => getFees(), [], {
     initial: null as Awaited<ReturnType<typeof getFees>> | null,
   });
-  const ethUsd = fees?.ETH_USD ?? ETH_USD;
+  const ethUsd = fees?.ETH_USD && fees.ETH_USD > 0 ? fees.ETH_USD : 0;
   const tradeFeeUsd = fees?.TRADE_FEE_USD ?? TRADE_FEE_USD;
-  const { data: remoteHolders } = useAsyncData(
+  useEffect(() => {
+    if (ethUsd > 0) setTrenchEthUsd(ethUsd);
+  }, [ethUsd]);
+  const { data: remoteHolders, reload: reloadHolders } = useAsyncData(
     () => getLaunchHolders(launch.address),
     [launch.address],
     { initial: [] as Holder[], enabled: !launch.draft && !chain },
   );
-  const { data: remoteTrades } = useAsyncData(
+  const { data: remoteTrades, reload: reloadTrades } = useAsyncData(
     () => getLaunchTrades(launch.address, { limit: 50 }),
     [launch.address],
     { initial: [] as TokenTrade[], enabled: !launch.draft && !chain },
   );
+  const { data: myBoxes, reload: reloadBoxes } = useAsyncData(() => getWalletLuckyBoxes(address), [address], {
+    initial: [] as LuckyBox[],
+    enabled: connected,
+    pollMs: 15_000,
+  });
   const holders = chain ? chainHolders : remoteHolders;
   const trades = chain ? chainTrades : remoteTrades;
+  // After a full exit, trench fills can lag — keep the wallet out of holders briefly.
+  const fullExitUntilRef = useRef<{ token: string; wallet: string; until: number } | null>(null);
+  function applyHolders(next: Holder[]) {
+    const exit = fullExitUntilRef.current;
+    if (exit && Date.now() < exit.until) {
+      return next.filter((row) => row.address.toLowerCase() !== exit.wallet);
+    }
+    if (exit && Date.now() >= exit.until) fullExitUntilRef.current = null;
+    return next;
+  }
   useEffect(() => {
     setShown(initialLaunch);
     setChainHolders(seededHolders ?? []);
     setChainTrades(seededTrades ?? []);
     setTicks(seededTicks ?? []);
+    fullExitUntilRef.current = null;
   }, [initialLaunch.address]);
   useEffect(() => {
     if (!chain) return;
@@ -101,7 +172,7 @@ export function Terminal({
         setShown(trenchToLaunch(detail.pair));
         const nextTicks = trenchTicks(detail);
         if (nextTicks.length > 0) setTicks(nextTicks);
-        if (detail.holders.length > 0) setChainHolders(trenchHolders(detail.holders));
+        if (detail.holders) setChainHolders(applyHolders(trenchHolders(detail.holders)));
         if (detail.trades.length > 0) setChainTrades(trenchTrades(detail.trades));
       } catch {
         /* keep the last chain snapshot */
@@ -131,17 +202,118 @@ export function Terminal({
   const [amount, setAmount] = useState(meta?.initialBuy || "0.1");
   const [trading, setTrading] = useState(false);
   const [tradeError, setTradeError] = useState("");
+  // Live ERC-20 balance for the connected wallet — holders-from-fills can lag / mis-order.
+  const [walletTokenBal, setWalletTokenBal] = useState<number | null>(null);
+  useEffect(() => {
+    if (!connected || !address || launch.draft) {
+      setWalletTokenBal(null);
+      return;
+    }
+    let stop = false;
+    const rpc = robinhoodChain.rpcUrls.default.http[0];
+    const reader = createPublicClient({ chain: robinhoodChain, transport: http(rpc) });
+    const pull = async () => {
+      try {
+        const [raw, decimals] = await Promise.all([
+          reader.readContract({
+            address: launch.address as Address,
+            abi: erc20BalanceAbi,
+            functionName: "balanceOf",
+            args: [address as Address],
+          }),
+          reader.readContract({
+            address: launch.address as Address,
+            abi: erc20BalanceAbi,
+            functionName: "decimals",
+          }),
+        ]);
+        if (stop) return;
+        const next = Number(formatUnits(raw, decimals));
+        setWalletTokenBal(Number.isFinite(next) ? next : 0);
+        const walletLc = address.toLowerCase();
+        const dust = !(next > 0) || (launch.priceUsd > 0 && next * launch.priceUsd < 0.01);
+        if (dust) {
+          // Strip ghost holder rows when chain says we exited.
+          fullExitUntilRef.current = {
+            token: launch.address.toLowerCase(),
+            wallet: walletLc,
+            until: Date.now() + 30_000,
+          };
+          if (chain) {
+            setChainHolders((prev) =>
+              prev.some((row) => row.address.toLowerCase() === walletLc)
+                ? prev.filter((row) => row.address.toLowerCase() !== walletLc)
+                : prev,
+            );
+          }
+        } else if (fullExitUntilRef.current?.wallet === walletLc) {
+          fullExitUntilRef.current = null;
+        }
+      } catch {
+        /* keep last known balance */
+      }
+    };
+    void pull();
+    const id = window.setInterval(pull, 4_000);
+    return () => {
+      stop = true;
+      window.clearInterval(id);
+    };
+  }, [connected, address, launch.address, launch.draft, launch.priceUsd, chain]);
   const [photo, setPhoto] = useState("");
-  const [claimed, setClaimed] = useState({ creator: false, pool: false });
   const [dataTab, setDataTab] = useState<"holders" | "tx">("holders");
   const [page, setPage] = useState(1);
+  const mineFromHolders = connected
+    ? holders.find((row) => row.address.toLowerCase() === address.toLowerCase())
+    : undefined;
+  const liveAmount =
+    walletTokenBal != null && Number.isFinite(walletTokenBal) ? walletTokenBal : mineFromHolders?.amount ?? 0;
+  const entryFromQuote =
+    mineFromHolders?.entryQuote != null && mineFromHolders.entryQuote > 0 && ethUsd > 0
+      ? mineFromHolders.entryQuote * ethUsd
+      : 0;
+  const entryFromTrades = connected ? avgEntryFromTrades(trades, address, ethUsd) : 0;
+  const myEntry =
+    (mineFromHolders?.entry && mineFromHolders.entry > 0 ? mineFromHolders.entry : 0) ||
+    entryFromQuote ||
+    entryFromTrades ||
+    0;
+  const mine =
+    connected && liveAmount > 0
+      ? {
+          rank: mineFromHolders?.rank ?? 0,
+          address,
+          amount: liveAmount,
+          share: mineFromHolders?.share ?? 0,
+          entry: myEntry,
+        }
+      : undefined;
+  const balance = mine?.amount ?? 0;
+  // Hide open-position after full exit / dust leftover from rounding.
+  const positionOpen =
+    Boolean(mine) && balance > 0 && (launch.priceUsd <= 0 || balance * launch.priceUsd >= 0.01);
   const quote = useMemo(() => {
+    if (side === "sell" && amount === "max") {
+      if (!(balance > 0) || launch.priceUsd <= 0) return 0;
+      const received = (balance * launch.priceUsd) / ethUsd;
+      return quoteAsset === "ETH" ? Math.max(0, received - tradeFeeUsd / ethUsd) : received;
+    }
     const value = Number(amount);
     if (!Number.isFinite(value) || value <= 0 || launch.priceUsd <= 0) return 0;
     if (side === "buy") return (value * ethUsd) / launch.priceUsd;
     const received = (value * launch.priceUsd) / ethUsd;
     return quoteAsset === "ETH" ? Math.max(0, received - tradeFeeUsd / ethUsd) : received;
-  }, [amount, ethUsd, launch.priceUsd, quoteAsset, side, tradeFeeUsd]);
+  }, [amount, balance, ethUsd, launch.priceUsd, quoteAsset, side, tradeFeeUsd]);
+
+  const spendUsd = useMemo(() => {
+    if (side === "sell" && amount === "max") {
+      return balance > 0 && launch.priceUsd > 0 ? balance * launch.priceUsd : 0;
+    }
+    const value = Number(amount);
+    if (!Number.isFinite(value) || value <= 0) return 0;
+    if (side === "buy") return quoteAsset === "ETH" ? value * ethUsd : 0;
+    return launch.priceUsd > 0 ? value * launch.priceUsd : 0;
+  }, [amount, balance, ethUsd, launch.priceUsd, quoteAsset, side]);
 
   const up = chain ? launch.marketCap >= (stats.ath || launch.marketCap) : launch.change1h >= 0;
   const creatorShare = 100 - launch.luckyShare;
@@ -165,9 +337,49 @@ export function Terminal({
   const [presetDraft, setPresetDraft] = useState(["0.1", "0.25", "0.5", "1"]);
   const [presetError, setPresetError] = useState("");
   const presetRef = useRef<HTMLDivElement>(null);
-  const accruedEth = (launch.marketCap / ethUsd) * (launch.creatorTax / 100) * (0.35 + launch.progress / 200);
-  const creatorEth = (accruedEth * creatorShare) / 100;
-  const poolEth = (accruedEth * launch.luckyShare) / 100;
+  const creatorFeeShare = fees?.CREATOR_FEE_SHARE ?? 0.8;
+  const tradesVolumeUsd = trades.reduce((sum, row) => {
+    if (typeof row.usd === "number" && Number.isFinite(row.usd)) return sum + Math.abs(row.usd);
+    if (Number.isFinite(row.eth) && row.eth !== 0) return sum + Math.abs(row.eth) * ethUsd;
+    return sum;
+  }, 0);
+  // Prefer live RewardRouter claimables (including 0). Only fall back to estimates when unknown.
+  const hasLiveCreator = stats.creatorClaimableEth != null;
+  const hasLivePool = stats.luckyBoxClaimableEth != null;
+  const liveCreatorEth = stats.creatorClaimableEth ?? 0;
+  const livePoolEth = stats.luckyBoxClaimableEth ?? 0;
+  const onChainTaxEth = stats.creatorTaxPaidEth ?? 0;
+  const volumeUsd = Math.max(stats.volume24h || 0, tradesVolumeUsd);
+  const rate = ethUsd;
+  const onChainPools =
+    onChainTaxEth > 0 ? feePoolsFromTaxEth(onChainTaxEth, launch.luckyShare) : null;
+  const estimatePools =
+    volumeUsd > 0 && rate > 0
+      ? feePoolsFromVolumeUsd(volumeUsd, launch.creatorTax, launch.luckyShare, creatorFeeShare)
+      : null;
+  const creatorEth = hasLiveCreator
+    ? liveCreatorEth
+    : onChainPools
+      ? onChainPools.creatorEth
+      : estimatePools && rate > 0
+        ? estimatePools.creatorUsd / rate
+        : 0;
+  const poolEth = hasLivePool
+    ? livePoolEth
+    : onChainPools
+      ? onChainPools.poolEth
+      : estimatePools && rate > 0
+        ? estimatePools.poolUsd / rate
+        : 0;
+  const feeSource = hasLiveCreator || hasLivePool
+    ? "onchain"
+    : onChainPools
+      ? "onchain"
+      : estimatePools
+        ? "volume"
+        : "none";
+  const creatorUsd = rate > 0 ? creatorEth * rate : 0;
+  const poolUsd = rate > 0 ? poolEth * rate : 0;
   const pageSize = 10;
   const dataRows = dataTab === "holders" ? holders : trades;
   const pages = Math.max(1, Math.ceil(dataRows.length / pageSize));
@@ -175,28 +387,97 @@ export function Terminal({
   const pageStart = (currentPage - 1) * pageSize;
   const visibleHolders = holders.slice(pageStart, pageStart + pageSize);
   const visibleTrades = trades.slice(pageStart, pageStart + pageSize);
-  const mine = connected ? holders.find((row) => row.address.toLowerCase() === address.toLowerCase()) : undefined;
   const runningPnl = mine && mine.entry > 0 ? ((launch.priceUsd - mine.entry) / mine.entry) * 100 : null;
   const runningDelta = mine ? mine.amount * (launch.priceUsd - mine.entry) : null;
-  const balance = mine?.amount ?? 0;
   const tokensFor = (percent: number) => {
+    if (percent >= 100) return "max";
     const tokens = (balance * percent) / 100;
     if (!Number.isFinite(tokens) || tokens <= 0) return "0";
     if (tokens >= 100) return String(Math.round(tokens * 100) / 100);
-    return String(Number(tokens.toPrecision(6)));
+    // Fixed decimals — never scientific notation (BE parseHuman rejects `e`).
+    const fixed = tokens.toFixed(8).replace(/\.?0+$/, "");
+    return fixed || "0";
   };
   const sellActive = (percent: number) => {
+    if (percent >= 100) return amount === "max";
     const target = Number(tokensFor(percent));
     const current = Number(amount);
     return target > 0 && Number.isFinite(current) && Math.abs(current - target) / target < 0.0005;
   };
   const isCreator = connected && address.toLowerCase() === launch.creator.toLowerCase();
-  const canClaimCreator = isCreator && creatorEth > 0 && !claimed.creator;
-  const canClaimPool = Boolean(mine) && poolEth > 0 && !claimed.pool;
-
+  const launchBoxes = myBoxes.filter((box) => boxForLaunch(box, launch));
+  const tokenBoxes = launchBoxes.filter(boxClaimable);
+  const holdingBoxes = launchBoxes.filter(boxHolding);
+  const hasTradeBoxes = launchBoxes.length > 0;
+  const [creatorClaimed, setCreatorClaimed] = useState(false);
+  const [poolClaimed, setPoolClaimed] = useState(false);
+  const [claimBusy, setClaimBusy] = useState<"creator" | null>(null);
+  const [feeNote, setFeeNote] = useState("");
   useEffect(() => {
-    setClaimed({ creator: false, pool: false });
-  }, [launch.address]);
+    if (!connected || !address) {
+      setCreatorClaimed(false);
+      setPoolClaimed(false);
+      return;
+    }
+    // Live claimable wins over a stale local "claimed" flag from older UI bugs.
+    const flaggedCreator =
+      window.localStorage.getItem(feeClaimKey("creator", launch.address, address)) === "1";
+    setCreatorClaimed(flaggedCreator && !(creatorEth > 0));
+    setPoolClaimed(window.localStorage.getItem(feeClaimKey("pool", launch.address, address)) === "1");
+  }, [connected, address, launch.address, creatorEth]);
+  // Always allow creator to try Claim — prepare settles pending tax first.
+  // Disable only when already marked claimed with no live balance.
+  const canClaimCreator =
+    !connected || (isCreator && !claimBusy && !(creatorClaimed && hasLiveCreator && liveCreatorEth <= 0));
+
+  async function onClaimCreator() {
+    if (!connected) {
+      connect();
+      return;
+    }
+    if (!isCreator || creatorClaimed || claimBusy) return;
+    if (!walletProvider) {
+      setFeeNote("Connect a wallet that can sign transactions.");
+      return;
+    }
+    setClaimBusy("creator");
+    setFeeNote("");
+    try {
+      if (activeChainId(chainId) !== robinhoodChain.id) await switchNetwork(robinhoodChain);
+
+      // Prepare settles pending tax (sweep/harvest/allocate) then returns claimCreator calldata.
+      const res = await claimCreatorFee({ wallet: address, token: launch.address });
+      const calls = (res.data.calls ?? []).map((call) => ({
+        to: call.to as Address,
+        data: (call.data || "0x") as Hex,
+        value: call.value || "0",
+      }));
+      if (calls.length === 0) {
+        setFeeNote(res.data.message || "No creator fee claimable on-chain yet.");
+        return;
+      }
+
+      const hashes = await sendTradeCalls(walletProvider, address as Address, calls);
+      const rpc = robinhoodChain.rpcUrls.default.http[0];
+      const reader = createPublicClient({ chain: robinhoodChain, transport: http(rpc) });
+      await Promise.all(
+        hashes.map((hash) => reader.waitForTransactionReceipt({ hash, timeout: 180_000 })),
+      );
+
+      const claimedEth = res.data.claimableEth ? Number(res.data.claimableEth) : liveCreatorEth;
+      window.localStorage.setItem(feeClaimKey("creator", launch.address, address), "1");
+      setCreatorClaimed(true);
+      setFeeNote(
+        `Claimed ${formatEth(Number.isFinite(claimedEth) ? claimedEth : 0)} creator fee${
+          hashes[0] ? ` · ${shortAddress(hashes[0])}` : ""
+        }.`,
+      );
+    } catch (err) {
+      setFeeNote(err instanceof ApiError ? err.message : tradeErrorText(err));
+    } finally {
+      setClaimBusy(null);
+    }
+  }
 
   function applySlippage(next: string) {
     const clean = next.replace(/[^\d.]/g, "");
@@ -284,12 +565,20 @@ export function Terminal({
       connect();
       return;
     }
-    const value = Number(amount);
+    const isMaxSell = side === "sell" && amount === "max";
+    const value = isMaxSell ? balance : Number(amount);
     if (!(value > 0)) {
       setTradeError("Enter an amount above 0.");
       return;
     }
-    if (side === "sell" && quoteAsset === "ETH" && quote <= 0) {
+    // Only block when we have a mid price and the UI estimate is clearly dust.
+    // If priceUsd is missing, let the backend FEE_EXCEEDS_OUTPUT decide.
+    if (
+      side === "sell" &&
+      quoteAsset === "ETH" &&
+      launch.priceUsd > 0 &&
+      quote <= 0
+    ) {
       setTradeError("Amount is below the $0.056 fee.");
       return;
     }
@@ -314,9 +603,96 @@ export function Terminal({
       callCount = prepared.calls.length;
       const hashes = await sendTradeCalls(walletProvider, address as Address, prepared.calls);
       for (const hash of hashes) {
-        const receipt = await reader.waitForTransactionReceipt({ hash, timeout: 60_000 });
+        const receipt = await reader.waitForTransactionReceipt({ hash, timeout: 120_000 });
         if (receipt.status === "reverted") throw new Error("Transaction reverted.");
         sent += 1;
+        try {
+          const confirmed = await confirmTrade({ token: launch.address, wallet: address, txHash: hash });
+          reloadBoxes();
+          const minted = confirmed.data?.boxesMinted ?? 0;
+          const unlocked = confirmed.data?.boxesUnlocked ?? 0;
+          if (minted > 0) {
+            setFeeNote(`Lucky Box earned — sell 100% to unlock on Rewards.`);
+          } else if (unlocked > 0) {
+            setFeeNote(`${unlocked} Lucky Box${unlocked === 1 ? "" : "es"} unlocked — open on Rewards.`);
+          }
+        } catch {
+          /* indexer will catch up; don't fail the trade UI */
+        }
+      }
+
+      // Keep Open position in sync immediately — holders poll can lag a few seconds.
+      if (chain) {
+        const walletLc = address.toLowerCase();
+        let remaining: number | null = null;
+        try {
+          const [raw, decimals] = await Promise.all([
+            reader.readContract({
+              address: launch.address as Address,
+              abi: erc20BalanceAbi,
+              functionName: "balanceOf",
+              args: [address as Address],
+            }),
+            reader.readContract({
+              address: launch.address as Address,
+              abi: erc20BalanceAbi,
+              functionName: "decimals",
+            }),
+          ]);
+          remaining = Number(formatUnits(raw, decimals));
+          if (Number.isFinite(remaining)) setWalletTokenBal(remaining);
+        } catch {
+          /* fall back to amount-based optimistic update */
+        }
+
+        const dust =
+          remaining !== null &&
+          (!(remaining > 0) || (launch.priceUsd > 0 && remaining * launch.priceUsd < 0.01));
+        const fullExit = side === "sell" && (isMaxSell || dust);
+
+        if (fullExit) {
+          fullExitUntilRef.current = {
+            token: launch.address.toLowerCase(),
+            wallet: walletLc,
+            until: Date.now() + 90_000,
+          };
+          setChainHolders((prev) => prev.filter((row) => row.address.toLowerCase() !== walletLc));
+        } else if (side === "sell" && remaining !== null) {
+          setChainHolders((prev) =>
+            prev
+              .map((row) =>
+                row.address.toLowerCase() === walletLc ? { ...row, amount: Math.max(0, remaining) } : row,
+              )
+              .filter((row) => row.amount > 0),
+          );
+        } else if (side === "sell") {
+          const sold = Number(amount);
+          if (Number.isFinite(sold) && sold > 0) {
+            setChainHolders((prev) =>
+              prev
+                .map((row) =>
+                  row.address.toLowerCase() === walletLc
+                    ? { ...row, amount: Math.max(0, row.amount - sold) }
+                    : row,
+                )
+                .filter((row) => row.amount > 0),
+            );
+          }
+        }
+
+        try {
+          const detail = await getTrenchToken(launch.address);
+          if (detail) {
+            setShown(trenchToLaunch(detail.pair));
+            if (detail.holders) setChainHolders(applyHolders(trenchHolders(detail.holders)));
+            if (detail.trades.length > 0) setChainTrades(trenchTrades(detail.trades));
+          }
+        } catch {
+          /* optimistic local holders already applied */
+        }
+      } else {
+        reloadHolders();
+        reloadTrades();
       }
     } catch (err) {
       if (sent > 0 && sent < callCount) setTradeError("The trade was not completed.");
@@ -351,30 +727,104 @@ export function Terminal({
     <div className={`token-page${dockOpen ? " trade-open" : ""}`}>
       <div className="token-stack">
         {!launch.draft ? (
+        <>
         <div className="fee-pair">
           <article className="sheet fee-card">
-            <span className="fee-icon">
+            <span className="fee-icon" aria-hidden>
               <WalletIcon />
             </span>
-            <span className="fee-title">Creator Fee</span>
-            <strong>{formatEth(creatorEth)}</strong>
-            <p>Kept by the token creator</p>
-            <button type="button" className="fee-claim" disabled={!canClaimCreator} onClick={() => setClaimed((current) => ({ ...current, creator: true }))}>
-              {claimed.creator ? "Claimed" : "Claim"}
-            </button>
+            <div className="fee-label">
+              <span className="fee-title">Creator Fee</span>
+              <PageInfo
+                tip={
+                  creatorClaimed || (hasLiveCreator && liveCreatorEth <= 0)
+                    ? "Nothing claimable right now. New trade tax settles into LootingRewardRouter after sweep — Claim lights up when balance is live."
+                    : feeSource === "onchain"
+                      ? "On-chain creator tax ready to claim from LootingRewardRouter."
+                      : feeSource === "volume"
+                        ? "Estimated from trading volume until live claimable balances sync."
+                        : "Waiting on trade volume."
+                }
+                label="Creator fee info"
+              />
+            </div>
+            <div className="fee-actions">
+              <div className="fee-amount">
+                <strong>{formatEth(creatorEth)}</strong>
+                {creatorUsd > 0 ? <em className="fee-usd">{formatUsd(creatorUsd)}</em> : null}
+              </div>
+              <button
+                type="button"
+                className="fee-claim"
+                disabled={!canClaimCreator || claimBusy === "creator"}
+                onClick={() => void onClaimCreator()}
+                title={isCreator || !connected ? "Claim creator fees" : "Only the creator can claim"}
+              >
+                {claimBusy === "creator" ? "…" : creatorClaimed ? "Claimed" : connected ? "Claim" : "Connect"}
+              </button>
+            </div>
           </article>
           <article className="sheet fee-card">
-            <span className="fee-icon">
+            <span className="fee-icon" aria-hidden>
               <GiftIcon />
             </span>
-            <span className="fee-title">Lucky Box Pool</span>
-            <strong>{formatEth(poolEth)}</strong>
-            <p>Funds Lucky Box rewards</p>
-            <button type="button" className="fee-claim" disabled={!canClaimPool} onClick={() => setClaimed((current) => ({ ...current, pool: true }))}>
-              {claimed.pool ? "Claimed" : "Claim"}
-            </button>
+            <div className="fee-label">
+              <span className="fee-title">Lucky Box Pool</span>
+              <PageInfo
+                tip={
+                  hasTradeBoxes
+                    ? tokenBoxes.length > 0
+                      ? `${tokenBoxes.length} box${tokenBoxes.length === 1 ? "" : "es"} ready — open on Rewards.`
+                      : holdingBoxes.length > 0
+                        ? "Sell 100% to unlock, then open on Rewards."
+                        : "Open Rewards to see your Lucky Boxes for this token."
+                    : "Pool accrual from creator tax. Boxes unlock after a qualifying buy and full exit."
+                }
+                label="Lucky Box pool info"
+              />
+            </div>
+            <div className="fee-actions">
+              <div className="fee-amount">
+                <strong>{formatEth(poolEth)}</strong>
+                {poolUsd > 0 ? <em className="fee-usd">{formatUsd(poolUsd)}</em> : null}
+              </div>
+              <button
+                type="button"
+                className="fee-claim"
+                onClick={() => {
+                  if (!connected) {
+                    connect();
+                    return;
+                  }
+                  if (hasTradeBoxes) {
+                    router.push("/rewards");
+                    return;
+                  }
+                  setFeeNote(
+                    "No Lucky Box yet. Buy ≥ $5 on this token, then sell 100% to unlock a box on Rewards.",
+                  );
+                }}
+                title={
+                  hasTradeBoxes
+                    ? "Open Rewards for your Lucky Boxes"
+                    : "Lucky Boxes need a qualifying buy + full exit"
+                }
+              >
+                {!connected
+                  ? "Connect"
+                  : tokenBoxes.length > 0
+                    ? "Open"
+                    : holdingBoxes.length > 0
+                      ? "Locked"
+                      : hasTradeBoxes
+                        ? "Rewards"
+                        : "No box"}
+              </button>
+            </div>
           </article>
         </div>
+        {feeNote ? <PageFlash note={feeNote} onClear={() => setFeeNote("")} /> : null}
+        </>
         ) : null}
       <section className="sheet token-main">
         <header className="token-head">
@@ -437,6 +887,10 @@ export function Terminal({
           </div>
         </header>
 
+        {feePending ? (
+          <PageFlash note="Token launched. LOOTING create fee (0.00035 ETH) was not confirmed in wallet — send it from create next time, or ignore if you already paid." />
+        ) : null}
+
         {launch.draft ? (
           <ul className="preview-meta token-draft-meta">
             <li>
@@ -488,7 +942,7 @@ export function Terminal({
           {chain ? (
             <CandleChart symbol={launch.symbol} ticks={ticks} spot={launch.marketCap} />
           ) : (
-            <Sparkline seed={launch.symbol} width={640} height={210} fill up={up} />
+            <p className="page-note">No live chart yet.</p>
           )}
         </div>
 
@@ -522,7 +976,9 @@ export function Terminal({
               value={`${PONS_LAUNCH_WINDOW.shortValue} · snipe decay`}
             />
           ) : null}
-          {launch.draft ? <Fact label="Graduation" value={!meta?.pair || meta.pair === "ETH" ? "4.2 ETH" : `In ${meta.pair}`} /> : null}
+          {launch.draft ? (
+            <Fact label="Graduation" value={!meta?.pair || meta.pair === "ETH" ? "On-chain threshold" : `In ${meta.pair}`} />
+          ) : null}
           {launch.draft ? <Fact label="Liquidity" value="Locked" /> : null}
         </dl>
       </section>
@@ -845,6 +1301,9 @@ export function Terminal({
               </button>
             </div>
             <input value={amount} onChange={(event) => setAmount(event.target.value)} inputMode="decimal" className="field" aria-label={side === "buy" ? `${quoteAsset} to spend` : `${launch.symbol} to sell`} />
+            <div className="amount-usd" aria-live="polite">
+              {spendUsd > 0 ? `≈ ${formatUsd(spendUsd)}` : "≈ $0.00"}
+            </div>
           </div>
           <div className="token-chips">
             {presetOpen
@@ -884,7 +1343,7 @@ export function Terminal({
         </button>
         {tradeError ? <p className="trade-note">{tradeError}</p> : null}
       </aside>
-      {mine ? (
+      {positionOpen && mine ? (
         <Position
           symbol={launch.symbol}
           price={launch.priceUsd}
@@ -919,53 +1378,133 @@ function hexValue(value: string) {
   return `0x${BigInt(value).toString(16)}`;
 }
 
+function txValue(value: string): Hex | undefined {
+  if (!value || value === "0" || value === "0x0" || value === "0x") return undefined;
+  return hexValue(value) as Hex;
+}
+
 async function sendTradeCalls(
   provider: EIP1193Provider,
   from: Address,
   calls: { to: Address; data: Hex; value: string }[],
 ): Promise<Hash[]> {
-  const call = calls[0];
-  if (!call) throw new Error("Nothing to send.");
-  if (calls.length === 1) {
-    const hash = (await provider.request({
-      method: "eth_sendTransaction",
-      params: [{ from, to: call.to, data: call.data, value: hexValue(call.value) }],
-    })) as Hash;
-    return [hash];
+  if (calls.length === 0) throw new Error("Nothing to send.");
+
+  // One MetaMask confirm for approve + sell + fee (msg.sender stays the user —
+  // unlike Multicall3). Fall back to sequential only if the wallet can't batch.
+  if (calls.length > 1) {
+    for (const atomicRequired of [true, false] as const) {
+      try {
+        const sent = (await (provider as EIP1193Provider).request({
+          method: "wallet_sendCalls",
+          params: [
+            {
+              version: "2.0.0",
+              from,
+              chainId: `0x${robinhoodChain.id.toString(16)}` as Hex,
+              atomicRequired,
+              calls: calls.map((item) => {
+                const value = txValue(item.value);
+                return {
+                  to: item.to,
+                  data: (item.data || "0x") as Hex,
+                  ...(value ? { value } : {}),
+                };
+              }),
+            },
+          ],
+        // viem EIP-5792 typings lag wallet implementations
+        } as never)) as { id?: string } | string;
+        const id = typeof sent === "string" ? sent : sent.id;
+        if (!id) continue;
+        return waitForCallHashes(provider, id);
+      } catch (err) {
+        if (isUserRejection(err)) throw err;
+      }
+    }
   }
-  const sent = (await provider.request({
-    method: "wallet_sendCalls",
-    params: [
-      {
-        version: "2.0.0",
-        from,
-        chainId: `0x${robinhoodChain.id.toString(16)}`,
-        atomicRequired: true,
-        calls: calls.map((item) => ({ to: item.to, data: item.data, value: hexValue(item.value) })),
-      },
-    ],
-  })) as { id?: string } | string;
-  const id = typeof sent === "string" ? sent : sent.id;
-  if (!id) throw new Error("Wallet did not return a transaction.");
-  return waitForCallHashes(provider, id);
+
+  const hashes: Hash[] = [];
+  for (const call of calls) {
+    try {
+      const value = txValue(call.value);
+      const hash = (await provider.request({
+        method: "eth_sendTransaction",
+        params: [
+          {
+            from,
+            to: call.to,
+            data: (call.data || "0x") as Hex,
+            ...(value ? { value } : {}),
+            chainId: `0x${robinhoodChain.id.toString(16)}`,
+          },
+        ],
+      })) as Hash;
+      hashes.push(hash);
+    } catch (err) {
+      if (hashes.length > 0) {
+        throw new Error(`Partially sent (${hashes.length}/${calls.length}). ${tradeErrorText(err)}`);
+      }
+      throw err;
+    }
+  }
+  return hashes;
 }
 
 async function waitForCallHashes(provider: EIP1193Provider, id: string): Promise<Hash[]> {
-  for (let attempt = 0; attempt < 40; attempt += 1) {
+  for (let attempt = 0; attempt < 60; attempt += 1) {
     const status = (await provider.request({
       method: "wallet_getCallsStatus",
       params: [id],
     })) as { status?: number | string; receipts?: { transactionHash?: Hash }[] };
     const code = Number(status.status);
     if (code === 200 || status.status === "CONFIRMED") {
-      const hashes = (status.receipts ?? []).map((receipt) => receipt.transactionHash).filter((hash): hash is Hash => Boolean(hash));
+      const hashes = (status.receipts ?? [])
+        .map((receipt) => receipt.transactionHash)
+        .filter((hash): hash is Hash => Boolean(hash));
       if (hashes.length === 0) throw new Error("Transaction was not broadcast.");
       return hashes;
     }
     if (code >= 400) throw new Error("Transaction failed.");
-    await new Promise((resolve) => window.setTimeout(resolve, 1500));
+    await new Promise((resolve) => window.setTimeout(resolve, 1200));
   }
   throw new Error("Transaction is still pending.");
+}
+
+function isUserRejection(err: unknown) {
+  const text = providerErrorText(err);
+  if (/reject|denied|cancel|user.?refus/i.test(text)) return true;
+  if (err && typeof err === "object" && "code" in err) {
+    const code = Number((err as { code: unknown }).code);
+    if (code === 4001 || code === 5000) return true;
+  }
+  return false;
+}
+
+function providerErrorText(err: unknown): string {
+  if (!err) return "";
+  if (typeof err === "string") return err;
+  if (err instanceof Error) {
+    const extra = err as Error & { cause?: unknown; details?: unknown; shortMessage?: string };
+    return (
+      extra.shortMessage ||
+      err.message ||
+      providerErrorText(extra.cause) ||
+      providerErrorText(extra.details)
+    );
+  }
+  if (typeof err === "object") {
+    const o = err as Record<string, unknown>;
+    for (const key of ["shortMessage", "message", "reason", "error", "data", "cause", "info"] as const) {
+      const value = o[key];
+      if (typeof value === "string" && value.trim()) return value;
+      if (value && typeof value === "object") {
+        const nested = providerErrorText(value);
+        if (nested) return nested;
+      }
+    }
+  }
+  return "";
 }
 
 function activeChainId(value: number | string | undefined) {
@@ -978,9 +1517,12 @@ function activeChainId(value: number | string | undefined) {
 
 function tradeErrorText(err: unknown) {
   if (err instanceof ApiError) return err.message || "Could not prepare the trade.";
-  const text = err instanceof Error ? err.message : "";
-  if (/reject|denied|cancel/i.test(text)) return "Transaction cancelled.";
-  return text ? text.slice(0, 140) : "Trade failed.";
+  const text = providerErrorText(err);
+  if (/reject|denied|cancel|user.?refus/i.test(text)) return "Transaction cancelled.";
+  if (/insufficient|fund|balance/i.test(text)) {
+    return "Wallet needs a little ETH for the $0.056 fee plus gas.";
+  }
+  return text ? text.slice(0, 160) : "Trade failed.";
 }
 
 function CheckIcon() {
@@ -1061,12 +1603,12 @@ function Position({
   wallet: string;
 }) {
   const value = amount * price;
-  const cost = amount * entry;
-  const delta = value - cost;
-  const pnl = entry > 0 ? ((price - entry) / entry) * 100 : 0;
-  const entryMcap = price > 0 ? marketCap * (entry / price) : 0;
-  const multiple = entry > 0 ? price / entry : 0;
-  const up = pnl >= 0;
+  const cost = entry > 0 ? amount * entry : 0;
+  const delta = entry > 0 ? value - cost : value;
+  const pnl = entry > 0 && price > 0 ? ((price - entry) / entry) * 100 : null;
+  const entryMcap = entry > 0 && price > 0 ? marketCap * (entry / price) : 0;
+  const multiple = entry > 0 && price > 0 ? price / entry : null;
+  const up = pnl === null ? true : pnl >= 0;
   const [unit, setUnit] = useState<"usd" | "eth">("usd");
   const [shareOpen, setShareOpen] = useState(false);
   const [shown, setShown] = useState<Record<PnlField, boolean>>({
@@ -1084,8 +1626,9 @@ function Position({
   const [note, setNote] = useState("");
   const [portalReady, setPortalReady] = useState(false);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const multipleLabel = multiple >= 10 ? `${multiple.toFixed(1)}x` : `${multiple.toFixed(2)}x`;
-  const pnlLabel = `${up ? "+" : ""}${pnl.toFixed(1)}%`;
+  const multipleLabel =
+    multiple === null ? "—" : multiple >= 10 ? `${multiple.toFixed(1)}x` : `${multiple.toFixed(2)}x`;
+  const pnlLabel = pnl === null ? "—" : `${up ? "+" : ""}${pnl.toFixed(1)}%`;
   const valueLabel = money(value);
   const shareText = `$${symbol} ${pnlLabel} · ${valueLabel} on LOOTING`;
   const sharePayload = useMemo(
@@ -1097,11 +1640,11 @@ function Position({
       valueLabel,
       multipleLabel,
       walletLabel: dottedAddress(wallet),
-      entryLabel: `Entry ${formatUsd(entryMcap)}`,
+      entryLabel: entry > 0 ? `Entry ${formatUsd(entryMcap)}` : "Entry —",
       athLabel: `ATH ${formatUsd(ath)}`,
       shown,
     }),
-    [ath, entryMcap, multipleLabel, pnlLabel, scene, shown, symbol, up, valueLabel, wallet],
+    [ath, entry, entryMcap, multipleLabel, pnlLabel, scene, shown, symbol, up, valueLabel, wallet],
   );
 
   useEffect(() => {
@@ -1186,9 +1729,8 @@ function Position({
       <section className="sheet position-card">
         <div className="position-head">
           <h2>Open position</h2>
-          <span className={`position-pill${up ? " is-up" : " is-down"}`}>
-            {up ? "+" : ""}
-            {pnl.toFixed(1)}%
+          <span className={`position-pill${pnl === null ? "" : up ? " is-up" : " is-down"}`}>
+            {pnl === null ? "—" : `${up ? "+" : ""}${pnl.toFixed(1)}%`}
           </span>
         </div>
         <strong className="position-value">{formatUsd(value)}</strong>
@@ -1198,17 +1740,16 @@ function Position({
         <dl>
           <div>
             <dt>Entry</dt>
-            <dd>{formatPrice(entry)}</dd>
+            <dd>{entry > 0 ? formatPrice(entry) : "—"}</dd>
           </div>
           <div>
             <dt>Cost</dt>
-            <dd>{formatUsd(cost)}</dd>
+            <dd>{entry > 0 ? formatUsd(cost) : "—"}</dd>
           </div>
           <div>
             <dt>PnL</dt>
-            <dd className={up ? "is-up" : "is-down"}>
-              {up ? "+" : "−"}
-              {formatUsd(Math.abs(delta))}
+            <dd className={pnl === null ? undefined : up ? "is-up" : "is-down"}>
+              {pnl === null ? "—" : `${up ? "+" : "−"}${formatUsd(Math.abs(delta))}`}
             </dd>
           </div>
         </dl>
@@ -1349,20 +1890,26 @@ async function paintPnlShareCard(input: PnlSharePaint, target?: HTMLCanvasElemen
   const drawH = sceneImg.naturalHeight * cover;
   ctx.drawImage(sceneImg, 0, (height - drawH) / 2, drawW, drawH);
 
-  const fade = ctx.createLinearGradient(width * 0.06, 0, width * 0.82, 0);
+  const fade = ctx.createLinearGradient(width * 0.02, 0, width * 0.78, 0);
   fade.addColorStop(0, "rgba(9, 9, 11, 0)");
-  fade.addColorStop(0.22, "rgba(9, 9, 11, 0.08)");
-  fade.addColorStop(0.46, "rgba(9, 9, 11, 0.28)");
-  fade.addColorStop(0.68, "rgba(9, 9, 11, 0.58)");
-  fade.addColorStop(0.86, "rgba(9, 9, 11, 0.86)");
+  fade.addColorStop(0.12, "rgba(9, 9, 11, 0.015)");
+  fade.addColorStop(0.24, "rgba(9, 9, 11, 0.04)");
+  fade.addColorStop(0.36, "rgba(9, 9, 11, 0.09)");
+  fade.addColorStop(0.48, "rgba(9, 9, 11, 0.18)");
+  fade.addColorStop(0.58, "rgba(9, 9, 11, 0.3)");
+  fade.addColorStop(0.68, "rgba(9, 9, 11, 0.46)");
+  fade.addColorStop(0.78, "rgba(9, 9, 11, 0.64)");
+  fade.addColorStop(0.88, "rgba(9, 9, 11, 0.82)");
+  fade.addColorStop(0.95, "rgba(9, 9, 11, 0.93)");
   fade.addColorStop(1, "#09090b");
   ctx.fillStyle = fade;
   ctx.fillRect(0, 0, width, height);
 
-  const floorH = 36 * s;
+  const floorH = 48 * s;
   const floor = ctx.createLinearGradient(0, height - floorH, 0, height);
   floor.addColorStop(0, "rgba(9, 9, 11, 0)");
-  floor.addColorStop(0.62, "rgba(9, 9, 11, 0.78)");
+  floor.addColorStop(0.35, "rgba(9, 9, 11, 0.12)");
+  floor.addColorStop(0.7, "rgba(9, 9, 11, 0.45)");
   floor.addColorStop(1, "#09090b");
   ctx.fillStyle = floor;
   ctx.fillRect(0, height - floorH, width, floorH);
@@ -1593,9 +2140,12 @@ function trimZeros(text: string) {
 }
 
 function formatEth(value: number) {
+  if (!(value > 0) || !Number.isFinite(value)) return "0 ETH";
   if (value >= 100) return `${value.toFixed(1)} ETH`;
   if (value >= 1) return `${value.toFixed(2)} ETH`;
-  return `${value.toFixed(4)} ETH`;
+  if (value >= 0.01) return `${value.toFixed(4)} ETH`;
+  if (value >= 0.0001) return `${value.toFixed(6)} ETH`;
+  return `${value.toFixed(8)} ETH`;
 }
 
 function formatAmount(value: number) {

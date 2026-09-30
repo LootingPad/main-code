@@ -1,8 +1,17 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
-const IPFS_GATEWAYS = ["https://ipfs.io/ipfs/", "https://dweb.link/ipfs/", "https://gateway.pinata.cloud/ipfs/"];
+/** Same priority as backend — public ipfs.io / pinata often 429 for anon traffic. */
+const IPFS_GATEWAYS = [
+  "https://ipfs.filebase.io/ipfs/",
+  "https://4everland.io/ipfs/",
+  "https://nftstorage.link/ipfs/",
+  "https://w3s.link/ipfs/",
+  "https://dweb.link/ipfs/",
+  "https://ipfs.io/ipfs/",
+  "https://gateway.pinata.cloud/ipfs/",
+];
 
 /** Browsers cannot load ipfs:// directly. Try public gateways, then the letter mark. */
 function logoSources(src: string): string[] {
@@ -11,10 +20,19 @@ function logoSources(src: string): string[] {
   const ipfs = value.match(/^ipfs:\/\/(?:ipfs\/)?(.+)$/i);
   if (ipfs) {
     const cid = ipfs[1].replace(/^\/+/, "");
-    return IPFS_GATEWAYS.map((gateway) => `${gateway}${cid}`);
+    return [
+      ...IPFS_GATEWAYS.map((gateway) => `${gateway}${cid}`),
+      `https://${cid}.ipfs.dweb.link`,
+      `https://${cid}.ipfs.nftstorage.link`,
+    ];
   }
   const ar = value.match(/^ar:\/\/(.+)$/i);
   if (ar) return [`https://arweave.net/${ar[1]}`];
+  const viaIpfs = value.match(/\/ipfs\/([^/?#]+)/i);
+  if (viaIpfs) {
+    const cid = viaIpfs[1];
+    return [value, ...IPFS_GATEWAYS.map((gateway) => `${gateway}${cid}`)];
+  }
   return [value];
 }
 
@@ -30,19 +48,34 @@ export function TokenLogo({
   /** Loads the image through the API so ipfs and blocked CDNs still render. */
   address?: string;
 }) {
-  const sources = [
-    ...(address ? [`/backend-api/trenches/image/${address}`] : []),
-    ...(src ? logoSources(src) : []),
-  ];
-  const [index, setIndex] = useState(0);
-  useEffect(() => setIndex(0), [src, address]);
-  const url = sources[index] ?? null;
+  const tokenKey = (address || symbol || "").toLowerCase();
+  const sources = useMemo(() => {
+    const list = [
+      ...(address ? [`/backend-api/trenches/image/${address}`] : []),
+      ...(src ? logoSources(src) : []),
+    ];
+    return [...new Set(list.filter(Boolean))];
+  }, [address, src]);
 
-  if (url) {
+  const [index, setIndex] = useState(0);
+  const [lockedUrl, setLockedUrl] = useState<string | null>(null);
+  const tokenRef = useRef(tokenKey);
+
+  useEffect(() => {
+    if (tokenRef.current === tokenKey) return;
+    tokenRef.current = tokenKey;
+    setLockedUrl(null);
+    setIndex(0);
+  }, [tokenKey]);
+
+  const showUrl = lockedUrl ?? (index < sources.length ? sources[index] : null);
+
+  if (showUrl) {
     return (
       // eslint-disable-next-line @next/next/no-img-element
       <img
-        src={url}
+        key={showUrl}
+        src={showUrl}
         alt=""
         width={size}
         height={size}
@@ -51,47 +84,44 @@ export function TokenLogo({
         loading="lazy"
         decoding="async"
         referrerPolicy="no-referrer"
-        onError={() => setIndex((current) => current + 1)}
+        onLoad={() => setLockedUrl(showUrl)}
+        onError={() => {
+          if (lockedUrl) return;
+          setIndex((current) => current + 1);
+        }}
       />
     );
   }
 
+  // Missing token art → LOOTING mark on a dark tile (never invent a fake coin image).
+  const pad = Math.max(4, Math.round(size * 0.18));
   return (
-    <svg width={size} height={size} viewBox="0 0 40 40" aria-hidden className="token-mark shrink-0">
-      <rect width="40" height="40" rx="8" fill={ground(symbol)} />
-      <Mark symbol={symbol} />
-    </svg>
-  );
-}
-
-function ground(symbol: string) {
-  if (symbol === "LOOTING") return "#111111";
-  if (symbol === "HARBOR" || symbol === "QUIET") return "#111111";
-  if (symbol === "THREAD" || symbol === "KEY") return "#f4f4f4";
-  return "#ccff00";
-}
-
-function ink(symbol: string) {
-  return symbol === "HARBOR" || symbol === "QUIET" || symbol === "LOOTING" ? "#ccff00" : "#111111";
-}
-
-function Mark({ symbol }: { symbol: string }) {
-  const stroke = ink(symbol);
-  if (symbol === "LOOTING") {
-    return (
-      <g fill="none" stroke={stroke} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <circle cx="20" cy="20" r="10" />
-        <path d="M20 12.5c2.2 2.5 3.8 4.8 3.8 7.1a3.8 3.8 0 0 1-7.6 0c0-2.3 1.6-4.6 3.8-7.1Z" />
-      </g>
-    );
-  }
-  return (
-    <g fill="none" stroke={stroke} strokeWidth="2" strokeLinecap="round">
-      <path d="M12 22c2-6 14-6 16 0" />
-      <path d="M15 18c1.5-3 8.5-3 10 0" />
-      <text x="20" y="28" textAnchor="middle" fill={stroke} stroke="none" fontSize="9" fontWeight="700">
-        {(symbol || "?").slice(0, 3)}
-      </text>
-    </g>
+    <span
+      className="token-mark shrink-0"
+      aria-hidden
+      title={symbol}
+      style={{
+        width: size,
+        height: size,
+        borderRadius: 8,
+        background: "#141414",
+        border: "1px solid rgba(255,255,255,0.08)",
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
+        boxSizing: "border-box",
+        padding: pad,
+      }}
+    >
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img
+        src="/logo.png"
+        alt=""
+        width={size - pad * 2}
+        height={size - pad * 2}
+        style={{ width: "100%", height: "100%", objectFit: "contain", opacity: 0.92 }}
+        decoding="async"
+      />
+    </span>
   );
 }

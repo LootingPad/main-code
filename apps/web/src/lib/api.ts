@@ -125,6 +125,104 @@ export async function prepareTrade(body: {
   return response.data;
 }
 
+export async function confirmTrade(body: { token: string; wallet: string; txHash: string }) {
+  return apiFetch<{
+    data: {
+      status: string;
+      txHash: string;
+      trades: number;
+      boxesMinted: number;
+      boxesUnlocked: number;
+    };
+  }>("/api/trade/confirm", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(60_000),
+  });
+}
+
+export async function prepareLaunch(body: {
+  wallet: string;
+  name: string;
+  symbol: string;
+  description?: string;
+  logo?: string;
+  website?: string;
+  twitter?: string;
+  telegram?: string;
+  discord?: string;
+  farcaster?: string;
+  creatorFee: number;
+  luckyShare: number;
+  holderShareEnabled?: boolean;
+  creatorWallet?: string;
+  pair?: string;
+  initialBuy?: string;
+  exemptions?: string[];
+  idempotencyKey?: string;
+}) {
+  const response = await apiFetch<{
+    data: {
+      actionId: string;
+      calls: { to: `0x${string}`; data: `0x${string}`; value: string; gas?: string }[];
+      launchFeeWei: string;
+      launchFeeEth: string;
+      quoteInWei: string;
+      pairToken: string;
+      launchConfigId: string;
+      mode: "launch" | "launchAndBuy";
+      creatorTaxBps: number;
+    };
+  }>("/api/launch/prepare", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(30_000),
+  });
+  return response.data;
+}
+
+/** Persist a data-URL logo; prefers ipfs:// when Pinata is configured. */
+export async function uploadMedia(dataUrl: string) {
+  const response = await apiFetch<{
+    data: {
+      id: string;
+      url: string;
+      httpsUrl?: string;
+      ipfsUri?: string | null;
+      gatewayUrl?: string;
+      contentType: string;
+      byteLength: number;
+      source?: "ipfs" | "https";
+    };
+  }>("/api/media", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ dataUrl }),
+    signal: AbortSignal.timeout(60_000),
+  });
+  return response.data;
+}
+
+export async function confirmLaunch(body: { actionId: string; txHash: string }) {
+  return apiFetch<{
+    status: string;
+    txHash?: string;
+    token?: string;
+    curve?: string;
+    pairToken?: string;
+    launchConfigId?: string;
+    error?: string;
+    message?: string;
+  }>("/api/launch/confirm", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(120_000),
+  });
+}
+
 export async function getLaunches(opts?: {
   limit?: number;
   offset?: number;
@@ -221,30 +319,85 @@ export async function getSeasonCurrent() {
 }
 
 export async function openLuckyBox(boxId: string, wallet?: string) {
-  return apiFetch<{ data: LuckyBox; reward?: string; digest?: string; tableId?: string }>(
-    `/api/lucky-boxes/${encodeURIComponent(boxId)}/open`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(wallet ? { wallet } : {}),
-    },
-  );
+  return apiFetch<{
+    data: LuckyBox;
+    reward?: string;
+    kind?: "miss" | "eth" | "erc20";
+    digest?: string;
+    tableId?: string;
+    creditedWei?: string;
+    payoutUsd?: number | null;
+    prizeAmount?: number | null;
+    prizeSymbol?: string | null;
+    creditTx?: string | null;
+    swapTx?: string | null;
+    claimableOnChain?: boolean;
+  }>(`/api/lucky-boxes/${encodeURIComponent(boxId)}/open`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(wallet ? { wallet } : {}),
+    // Keeper may credit / swap on open — allow longer than default 8s.
+    signal: AbortSignal.timeout(90_000),
+  });
 }
 
-/** Draft / preview helper when API has no row yet. */
+export async function claimCreatorFee(body: { wallet: string; token?: string }) {
+  return apiFetch<{
+    data: {
+      mode: string;
+      calls: { to: `0x${string}`; data: `0x${string}`; value: string }[];
+      tokens: string[];
+      message: string;
+      claimableEth?: string;
+      claimableWei?: string;
+    };
+  }>("/api/fees/claim/prepare", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ...body, kind: "creator" }),
+    // Backend may sweep/harvest/allocate before returning the claim call.
+    signal: AbortSignal.timeout(90_000),
+  });
+}
+
+export async function claimLuckyBox(boxId: string, wallet?: string) {
+  return apiFetch<{
+    data: LuckyBox;
+    onChain?: boolean;
+    mode?: string;
+    pendingWei?: string;
+    calls?: { to: `0x${string}`; data: `0x${string}`; value: string }[];
+    message?: string;
+    reason?: string;
+  }>(`/api/lucky-boxes/${encodeURIComponent(boxId)}/claim`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(wallet ? { wallet } : {}),
+  });
+}
+
+export async function confirmLuckyBoxClaim(boxId: string, body: { wallet?: string; txHash?: string }) {
+  return apiFetch<{ data: LuckyBox }>(`/api/lucky-boxes/${encodeURIComponent(boxId)}/claim/confirm`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+/** Preview helper when API has no row yet — zeros only, never invent market numbers. */
 export function draftLaunch(partial: Partial<Launch> & { address: string }): Launch {
   return {
     address: partial.address,
     name: partial.name || "Untitled",
     symbol: (partial.symbol || "NEW").toUpperCase(),
-    description: partial.description || "Draft coin. Not launched yet.",
+    description: partial.description || "",
     creator: partial.creator || "0x0000000000000000000000000000000000000000",
     marketCap: partial.marketCap ?? 0,
     progress: partial.progress ?? 0,
     change1h: partial.change1h ?? 0,
-    priceUsd: partial.priceUsd ?? 0.000001,
-    luckyShare: partial.luckyShare ?? 20,
-    creatorTax: partial.creatorTax ?? 1,
+    priceUsd: partial.priceUsd ?? 0,
+    luckyShare: partial.luckyShare ?? 0,
+    creatorTax: partial.creatorTax ?? 0,
     phase: partial.phase ?? "curve",
     draft: true,
   };

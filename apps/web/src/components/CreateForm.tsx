@@ -1,15 +1,29 @@
 "use client";
 
+import { useAppKitNetwork, useAppKitProvider } from "@reown/appkit/react";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { useWallet } from "@/components/Wallet";
+import {
+  createPublicClient,
+  http,
+  type Address,
+  type EIP1193Provider,
+  type Hash,
+  type Hex,
+} from "viem";
+import { ApiError, confirmLaunch, prepareLaunch, uploadMedia } from "@/lib/api";
+import { robinhoodChain } from "@/lib/chains";
 import { DRAFT_KEY, type CoinDraft } from "@/lib/draft";
 import { PONS_LAUNCH_WINDOW } from "@/lib/launch-window";
+import { PageTitle } from "@/components/PageInfo";
 import { formatCount, shortAddress } from "@/lib/format";
 import { TokenLogo } from "./TokenLogo";
+import { useWallet } from "@/components/Wallet";
 
 const stockPairs = ["NVDA", "AAPL", "TSLA", "SPY", "AMZN", "META", "GOOGL", "MSFT", "COIN"] as const;
 const taxPresets = [1, 2, 3] as const;
+/** Display only until prepare returns the on-chain total (Pons launchFee + LOOTING 0.00035). */
+const LAUNCH_FEE_ETH = "0.00085";
 
 const pairLogos: Record<string, string> = {
   ETH: "/pairs/eth.svg",
@@ -68,9 +82,218 @@ function FieldTip({ children }: { children: ReactNode }) {
   );
 }
 
+function hexValue(value: string) {
+  return `0x${BigInt(value).toString(16)}`;
+}
+
+function activeChainId(value: number | string | undefined) {
+  if (typeof value === "number") return value;
+  if (!value) return 0;
+  const raw = value.includes(":") ? value.split(":").pop() : value;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+async function waitForCallHashes(provider: EIP1193Provider, id: string): Promise<Hash[]> {
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    const status = (await provider.request({
+      method: "wallet_getCallsStatus",
+      params: [id],
+    })) as { status?: number | string; receipts?: { transactionHash?: Hash }[] };
+    const code = Number(status.status);
+    if (code === 200 || status.status === "CONFIRMED") {
+      const hashes = (status.receipts ?? [])
+        .map((receipt) => receipt.transactionHash)
+        .filter((hash): hash is Hash => Boolean(hash));
+      if (hashes.length === 0) throw new Error("Transaction was not broadcast.");
+      return hashes;
+    }
+    if (code >= 400) throw new Error("Transaction failed.");
+    await new Promise((resolve) => window.setTimeout(resolve, 1200));
+  }
+  throw new Error("Transaction is still pending.");
+}
+
+type LaunchCallTx = {
+  to: Address;
+  data: Hex;
+  value: string;
+  gas?: string;
+  maxFeePerGas?: string;
+  maxPriorityFeePerGas?: string;
+};
+
+type LaunchSendResult = {
+  hashes: Hash[];
+  /** False when launch landed but LOOTING 0.00035 fee was skipped / rejected. */
+  feeSent: boolean;
+  batched: boolean;
+};
+
+/** Providers that might support EIP-5792 batching (connected session + injected MM). */
+function launchBatchProviders(provider: EIP1193Provider): EIP1193Provider[] {
+  const out: EIP1193Provider[] = [provider];
+  if (typeof window === "undefined") return out;
+  const eth = (window as Window & { ethereum?: EIP1193Provider & { isMetaMask?: boolean; providers?: EIP1193Provider[] } }).ethereum;
+  if (!eth) return out;
+  if (eth.isMetaMask && eth !== provider) out.unshift(eth);
+  const list = eth.providers;
+  if (Array.isArray(list)) {
+    const metaMask = list.find((item) => (item as { isMetaMask?: boolean }).isMetaMask);
+    if (metaMask && !out.includes(metaMask)) out.unshift(metaMask);
+  }
+  return out;
+}
+
+async function tryWalletSendCalls(
+  provider: EIP1193Provider,
+  from: Address,
+  calls: LaunchCallTx[],
+): Promise<Hash[] | null> {
+  const batchCalls = calls.map((item) => ({
+    to: item.to,
+    data: (item.data || "0x") as Hex,
+    value: hexValue(item.value) as Hex,
+  }));
+  const chainId = `0x${robinhoodChain.id.toString(16)}` as Hex;
+  // Wallet EIP-5792 shapes differ across MetaMask / AppKit — try a few, fall back to sequential.
+  for (const atomicRequired of [false, true] as const) {
+    try {
+      const sent = (await provider.request({
+        method: "wallet_sendCalls",
+        params: [
+          {
+            version: "2.0.0",
+            from,
+            chainId,
+            atomicRequired,
+            calls: batchCalls,
+          },
+        ],
+      } as never)) as { id?: string } | string;
+      const id = typeof sent === "string" ? sent : sent.id;
+      if (!id) continue;
+      return waitForCallHashes(provider, id);
+    } catch (err) {
+      if (isLaunchUserRejection(err)) throw err;
+    }
+  }
+  return null;
+}
+
+async function sendOneLaunchTx(
+  provider: EIP1193Provider,
+  from: Address,
+  call: LaunchCallTx,
+): Promise<Hash> {
+  return (await provider.request({
+    method: "eth_sendTransaction",
+    params: [
+      {
+        from,
+        to: call.to,
+        data: (call.data || "0x") as Hex,
+        value: hexValue(call.value) as Hex,
+        ...(call.gas ? { gas: hexValue(call.gas) as Hex } : {}),
+        ...(call.maxFeePerGas ? { maxFeePerGas: hexValue(call.maxFeePerGas) as Hex } : {}),
+        ...(call.maxPriorityFeePerGas
+          ? { maxPriorityFeePerGas: hexValue(call.maxPriorityFeePerGas) as Hex }
+          : {}),
+      },
+    ],
+  })) as Hash;
+}
+
+/**
+ * Prefer one wallet confirm (EIP-5792) for launchToken + LOOTING fee.
+ * Never Multicall3 — Pons deployer = msg.sender.
+ * Sequential fallback still returns launch hash if fee is rejected after create.
+ */
+async function sendLaunchCalls(
+  provider: EIP1193Provider,
+  from: Address,
+  calls: LaunchCallTx[],
+): Promise<LaunchSendResult> {
+  if (calls.length === 0) throw new Error("Nothing to send.");
+
+  if (calls.length > 1) {
+    for (const batchProvider of launchBatchProviders(provider)) {
+      const hashes = await tryWalletSendCalls(batchProvider, from, calls);
+      if (hashes?.length) {
+        return { hashes, feeSent: true, batched: true };
+      }
+    }
+  }
+
+  // Fallback: sequential confirms. Confirm launch before prompting for the fee;
+  // if the fee is rejected, still return the launch hash so we can redirect.
+  const hashes: Hash[] = [];
+  for (let i = 0; i < calls.length; i += 1) {
+    const call = calls[i]!;
+    const isFeeCall = i > 0 && (!call.data || call.data === "0x");
+    try {
+      hashes.push(await sendOneLaunchTx(provider, from, call));
+    } catch (err) {
+      if (hashes.length > 0 && isFeeCall) {
+        return { hashes, feeSent: false, batched: false };
+      }
+      throw err;
+    }
+  }
+  return { hashes, feeSent: true, batched: false };
+}
+
+function launchProviderErrorText(err: unknown): string {
+  if (!err) return "";
+  if (typeof err === "string") return err;
+  if (err instanceof Error) {
+    const extra = err as Error & { cause?: unknown; details?: unknown; shortMessage?: string };
+    return (
+      extra.shortMessage ||
+      err.message ||
+      launchProviderErrorText(extra.cause) ||
+      launchProviderErrorText(extra.details)
+    );
+  }
+  if (typeof err === "object") {
+    const o = err as Record<string, unknown>;
+    for (const key of ["shortMessage", "message", "reason", "error", "data", "cause", "info"] as const) {
+      const value = o[key];
+      if (typeof value === "string" && value.trim()) return value;
+      if (value && typeof value === "object") {
+        const nested = launchProviderErrorText(value);
+        if (nested) return nested;
+      }
+    }
+  }
+  return "";
+}
+
+function isLaunchUserRejection(err: unknown) {
+  const text = launchProviderErrorText(err);
+  if (/reject|denied|cancel|user.?refus/i.test(text)) return true;
+  if (err && typeof err === "object" && "code" in err) {
+    const code = Number((err as { code: unknown }).code);
+    if (code === 4001 || code === 5000) return true;
+  }
+  return false;
+}
+
+function launchErrorText(err: unknown) {
+  if (err instanceof ApiError) return err.message || "Could not prepare the launch.";
+  const text = launchProviderErrorText(err);
+  if (/reject|denied|cancel|user.?refus/i.test(text)) return "Transaction cancelled.";
+  if (/insufficient|fund|balance/i.test(text)) {
+    return "Wallet needs enough ETH for the launch fee (0.00085) plus gas.";
+  }
+  return text ? text.slice(0, 160) : "Launch failed.";
+}
+
 export function CreateForm() {
   const router = useRouter();
-  const { connected, connect } = useWallet();
+  const { connected, address, connect } = useWallet();
+  const { walletProvider } = useAppKitProvider<EIP1193Provider>("eip155");
+  const { chainId, switchNetwork } = useAppKitNetwork();
   const [name, setName] = useState("");
   const [symbol, setSymbol] = useState("");
   const [description, setDescription] = useState("");
@@ -86,6 +309,8 @@ export function CreateForm() {
   const [pairUp, setPairUp] = useState(false);
   const [image, setImage] = useState("");
   const [error, setError] = useState("");
+  const [launching, setLaunching] = useState(false);
+  const launchFeeEth = LAUNCH_FEE_ETH;
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [holderShare, setHolderShare] = useState(false);
   const [creatorWallet, setCreatorWallet] = useState("");
@@ -95,10 +320,17 @@ export function CreateForm() {
   const pairRef = useRef<HTMLDivElement>(null);
 
   const ticker = symbol.trim().toUpperCase();
-  const kept = Math.max(0, creatorFee - boxCut);
-  const luckyShare = creatorFee > 0 ? Math.round((boxCut / creatorFee) * 100) : 0;
-  const estimate = useMemo(() => Math.round(100_000 * (boxCut / 100)), [boxCut]);
-  const splitFill = `${((boxCut - 0.5) / Math.max(creatorFee - 0.5, 0.1)) * 100}%`;
+  // Total tax first (presets); Lucky Box is a cut of that total, floor 0.5pp.
+  const MIN_BOX = 0.5;
+  const safeBox = Math.min(creatorFee, Math.max(MIN_BOX, boxCut));
+  const kept = Math.max(0, creatorFee - safeBox);
+  const luckyShare = creatorFee > 0 ? Math.round((safeBox / creatorFee) * 100) : 0;
+  const estimate = useMemo(() => Math.round(100_000 * (safeBox / 100)), [safeBox]);
+  const splitFill = `${((safeBox - MIN_BOX) / Math.max(creatorFee - MIN_BOX, 0.1)) * 100}%`;
+
+  useEffect(() => {
+    if (boxCut !== safeBox) setBoxCut(safeBox);
+  }, [boxCut, safeBox]);
 
   useEffect(() => {
     if (!pairOpen) return;
@@ -131,7 +363,7 @@ export function CreateForm() {
   function applyFee(next: number) {
     const fee = Math.min(5, Math.max(0.5, Math.round(next * 10) / 10));
     setCreatorFee(fee);
-    setBoxCut((current) => Math.min(fee, Math.max(0.5, current)));
+    setBoxCut((current) => Math.min(fee, Math.max(MIN_BOX, current)));
   }
 
   function addExempt() {
@@ -171,7 +403,25 @@ export function CreateForm() {
     reader.readAsDataURL(file);
   }
 
-  function launch() {
+  async function resolveLogoUri(value: string): Promise<string> {
+    const trimmed = value.trim();
+    if (!trimmed) return "";
+    if (trimmed.startsWith("data:")) {
+      const uploaded = await uploadMedia(trimmed);
+      return uploaded.url;
+    }
+    if (
+      trimmed.startsWith("ipfs://") ||
+      trimmed.startsWith("ar://") ||
+      trimmed.startsWith("https://") ||
+      trimmed.startsWith("http://")
+    ) {
+      return trimmed;
+    }
+    return "";
+  }
+
+  async function launch() {
     const cleanName = name.trim();
     const cleanSymbol = ticker.replace(/[^A-Z0-9]/g, "");
     if (cleanName.length < 2) {
@@ -192,7 +442,11 @@ export function CreateForm() {
       setError("Creator wallet needs a full 0x address.");
       return;
     }
-    if (!connected) {
+    if (pair !== "ETH") {
+      setError(`${pair} pairing is not available yet. Launch against ETH.`);
+      return;
+    }
+    if (!connected || !address) {
       connect();
       return;
     }
@@ -207,6 +461,7 @@ export function CreateForm() {
       discord: "",
       farcaster: "",
       creatorFee,
+      boxCut: safeBox,
       luckyShare,
       initialBuy: initialBuy.trim(),
       pair,
@@ -217,40 +472,83 @@ export function CreateForm() {
     };
     window.sessionStorage.setItem(DRAFT_KEY, JSON.stringify(draft));
 
-    const params = new URLSearchParams({
-      name: draft.name,
-      symbol: draft.symbol,
-      description: draft.description,
-      lucky: String(draft.luckyShare),
-      fee: String(draft.creatorFee),
-      website: draft.website,
-      twitter: draft.twitter,
-      telegram: draft.telegram,
-      discord: draft.discord,
-      farcaster: draft.farcaster,
-      buy: draft.initialBuy,
-      pair: draft.pair,
-      holders: draft.holderShare ? "1" : "0",
-      wallet: draft.creatorWallet,
-      exempt: draft.exemptions.join(","),
-    });
-    router.push(`/token/preview?${params.toString()}`);
+    setError("");
+    setLaunching(true);
+    try {
+      if (!walletProvider) {
+        connect();
+        return;
+      }
+      if (activeChainId(chainId) !== robinhoodChain.id) await switchNetwork(robinhoodChain);
+
+      const logoUri = await resolveLogoUri(draft.image);
+      const prepared = await prepareLaunch({
+        wallet: address,
+        name: draft.name,
+        symbol: draft.symbol,
+        description: draft.description,
+        logo: logoUri,
+        twitter: draft.twitter,
+        telegram: draft.telegram,
+        creatorFee: draft.creatorFee,
+        luckyShare: draft.luckyShare,
+        holderShareEnabled: draft.holderShare,
+        creatorWallet: draft.creatorWallet || undefined,
+        pair: draft.pair,
+        initialBuy: draft.initialBuy || undefined,
+        exemptions: draft.exemptions,
+        idempotencyKey: `launch:${address}:${draft.symbol}:${Date.now()}`,
+      });
+      const rpc = robinhoodChain.rpcUrls.default.http[0];
+      const reader = createPublicClient({ chain: robinhoodChain, transport: http(rpc) });
+      const sent = await sendLaunchCalls(
+        walletProvider,
+        address as Address,
+        prepared.calls as LaunchCallTx[],
+      );
+      let token = "";
+      let lastError: unknown;
+      // Prefer launch tx first (fee call is usually last / empty data).
+      for (const hash of sent.hashes) {
+        try {
+          const receipt = await reader.waitForTransactionReceipt({ hash, timeout: 120_000 });
+          if (receipt.status === "reverted") {
+            lastError = new Error("Transaction reverted.");
+            continue;
+          }
+          const confirmed = await confirmLaunch({ actionId: prepared.actionId, txHash: hash });
+          if (confirmed.token) {
+            token = confirmed.token;
+            break;
+          }
+        } catch (err) {
+          lastError = err;
+        }
+      }
+      if (!token) throw lastError instanceof Error ? lastError : new Error("Could not confirm launch.");
+      window.sessionStorage.removeItem(DRAFT_KEY);
+      // Always leave create after a successful launch — even if LOOTING fee was skipped.
+      router.push(sent.feeSent ? `/token/${token}` : `/token/${token}?launchFee=pending`);
+    } catch (err) {
+      setError(launchErrorText(err));
+    } finally {
+      setLaunching(false);
+    }
   }
 
   return (
     <div className="create-page">
       <div className="page-head">
-        <div>
-          <h1 className="explore-title">Create coin</h1>
-          <p className="page-note">Set the coin, its links, and how much of the creator fee funds Lucky Boxes.</p>
-        </div>
+        <PageTitle tip="Set the coin, its links, and how much of the creator fee funds Lucky Boxes.">
+          Create coin
+        </PageTitle>
       </div>
 
       <form
         className="create-layout"
         onSubmit={(event) => {
           event.preventDefault();
-          launch();
+          void launch();
         }}
       >
         <section className="sheet create-card create-main">
@@ -307,7 +605,7 @@ export function CreateForm() {
                   if (!next) setImage("");
                 }}
               />
-              <FieldTip>Selected artwork will be moderated and uploaded to public IPFS.</FieldTip>
+              <FieldTip>Preview only for now — on-chain logo needs an ipfs:// or https:// URI.</FieldTip>
               <span className="coin-check-short">Public IPFS</span>
             </label>
             <label className={`upload upload-wide${imageOk ? "" : " is-locked"}`}>
@@ -397,22 +695,24 @@ export function CreateForm() {
               </div>
               <div>
                 <p className="text-xs text-[var(--gold)]">Lucky Boxes</p>
-                <p className="split-value">{boxCut.toFixed(2)}%</p>
+                <p className="split-value">{safeBox.toFixed(2)}%</p>
               </div>
             </div>
             <input
               type="range"
-              min={0.5}
+              min={MIN_BOX}
               max={creatorFee}
               step={0.1}
-              value={boxCut}
-              onChange={(event) => setBoxCut(Math.max(0.5, Math.min(creatorFee, Number(event.target.value))))}
+              value={safeBox}
+              onChange={(event) => setBoxCut(Math.max(MIN_BOX, Math.min(creatorFee, Number(event.target.value))))}
               className="split-range"
               style={{ ["--fill" as string]: splitFill }}
               aria-label="Lucky Box share"
             />
             <p className="hint-slot">
-              <FieldTip>Minimum 0.5% of creator tax for Lucky Boxes · ~${formatCount(estimate)} per $100k volume to boxes.</FieldTip>
+              <FieldTip>
+                Pick total tax first. Lucky Boxes take at least {MIN_BOX}% of that total · ~${formatCount(estimate)} per $100k volume to boxes.
+              </FieldTip>
             </p>
           </div>
 
@@ -546,8 +846,14 @@ export function CreateForm() {
           </div>
 
           {error && <p className="text-sm text-[var(--down)]">{error}</p>}
-          <button type="submit" className="btn compact create-submit w-full">
-            {connected ? "Create coin" : "Connect to create"}
+          <p className="hint-slot create-wallet-hint">
+            <FieldTip>
+              One wallet confirm for launch + 0.00035 LOOTING fee (via router). Initial buy still needs a separate fee confirm for now.
+              If MetaMask shows a Review warning on the Pons factory, tap Continue, then Confirm.
+            </FieldTip>
+          </p>
+          <button type="submit" className="btn compact create-submit w-full" disabled={launching}>
+            {launching ? "Confirm in wallet" : connected ? "Create coin" : "Connect to create"}
           </button>
             </div>
           </div>
@@ -578,7 +884,7 @@ export function CreateForm() {
             </li>
             <li>
               <span>Boxes</span>
-              <b className="num">{boxCut.toFixed(2)}%</b>
+              <b className="num">{safeBox.toFixed(2)}%</b>
             </li>
             <li>
               <span>{holderShare ? "Holders" : "You keep"}</span>
@@ -594,7 +900,7 @@ export function CreateForm() {
             </li>
             <li>
               <span>Launch fee</span>
-              <b className="num">0.00085 ETH</b>
+              <b className="num">{launchFeeEth} ETH</b>
             </li>
             <li className="preview-meta-stack">
               <div className="preview-meta-row">
@@ -605,7 +911,7 @@ export function CreateForm() {
             </li>
             <li>
               <span>Graduation</span>
-              <b className="num">{pair === "ETH" ? "4.2 ETH" : `In ${pair}`}</b>
+              <b className="num">{pair === "ETH" ? "On-chain threshold" : `In ${pair}`}</b>
             </li>
             <li>
               <span>Liquidity</span>

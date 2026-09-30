@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { PageTitle } from "@/components/PageInfo";
 
 const sections = [
   {
@@ -55,10 +56,7 @@ export default function DocsPage() {
   return (
     <div className="doc-page">
       <div className="page-head">
-        <div>
-          <h1 className="explore-title">Docs</h1>
-          <p className="page-note">Introduction to LOOTING on Robinhood Chain.</p>
-        </div>
+        <PageTitle tip="Introduction to LOOTING on Robinhood Chain.">Docs</PageTitle>
         <div className="doc-actions">
           <Link href="/docs/guide" className="claim-btn">
             Detailed docs

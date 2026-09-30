@@ -11,6 +11,7 @@ type PageProps = {
     description?: string;
     lucky?: string;
     fee?: string;
+    launchFee?: string;
     website?: string;
     twitter?: string;
     telegram?: string;
@@ -29,6 +30,7 @@ export default async function TokenPage({ params, searchParams }: PageProps) {
   const query = await searchParams;
 
   const trench = await getTrenchToken(address).catch(() => null);
+  const feePending = query.launchFee === "pending";
   if (trench) {
     const launch = trenchToLaunch(trench.pair);
     const socials = trench.pair.socials;
@@ -37,6 +39,7 @@ export default async function TokenPage({ params, searchParams }: PageProps) {
         launch={launch}
         initialStats={launch.stats}
         chain
+        feePending={feePending}
         holders={trenchHolders(trench.holders)}
         trades={trenchTrades(trench.trades)}
         ticks={trenchTicks(trench)}
@@ -71,6 +74,7 @@ export default async function TokenPage({ params, searchParams }: PageProps) {
     <Terminal
       launch={launch}
       initialStats={"stats" in launch ? launch.stats : undefined}
+      feePending={feePending}
       meta={{
         website: query.website,
         twitter: query.twitter,

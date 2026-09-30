@@ -351,6 +351,16 @@ export function TableIcon() {
   );
 }
 
+export function InfoIcon({ size }: IconProps) {
+  return (
+    <Frame size={size}>
+      <circle cx="12" cy="12" r="8.2" stroke="currentColor" strokeWidth="1.7" />
+      <path d="M12 7.2v6.2" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+      <circle cx="12" cy="16.4" r="1.05" fill="currentColor" />
+    </Frame>
+  );
+}
+
 export function XIcon({ size = 14 }: IconProps) {
   return (
     <Frame size={size}>

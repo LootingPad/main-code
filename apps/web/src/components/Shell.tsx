@@ -4,8 +4,9 @@ import dynamic from "next/dynamic";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { FormEvent, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { getCreatorLaunches, getFees, getLaunches } from "@/lib/api";
+import { getCreatorLaunches, getFees, getLaunches, claimCreatorFee } from "@/lib/api";
 import { formatUsd, shortAddress } from "@/lib/format";
+import { setTrenchEthUsd } from "@/lib/trenches";
 import type { FeesConfig, LaunchWithStats } from "@/lib/types";
 import { useAsyncData } from "@/lib/use-async-data";
 import { BookIcon, NavIcon, PanelIcon, PlusIcon, SearchIcon, TelegramIcon, XIcon } from "./Icons";
@@ -57,12 +58,13 @@ const sideLinks = [
   { href: "https://t.me/lootingpad", label: "Telegram", icon: <TelegramIcon size={20} />, external: true },
 ];
 
-const DEFAULT_ETH_USD = 3500;
-
-function creatorFeeEth(launch: LaunchWithStats, ethUsd: number) {
-  const rate = ethUsd > 0 ? ethUsd : DEFAULT_ETH_USD;
-  const accrued = (launch.marketCap / rate) * (launch.creatorTax / 100) * (0.35 + launch.progress / 200);
-  return (accrued * (100 - launch.luckyShare)) / 100;
+function creatorFeeEth(launch: LaunchWithStats, ethUsd: number, creatorFeeShare = 0.8) {
+  if (!(ethUsd > 0)) return 0;
+  const volumeUsd = launch.stats?.volume24h ?? 0;
+  if (!(volumeUsd > 0) || !(launch.creatorTax > 0)) return 0;
+  const tax = launch.creatorTax / 100;
+  const creatorSide = volumeUsd * tax * creatorFeeShare;
+  return (creatorSide * (100 - launch.luckyShare)) / 100 / ethUsd;
 }
 
 function formatEth(value: number) {
@@ -86,7 +88,10 @@ export function Shell({ children }: { children: React.ReactNode }) {
   const { data: fees } = useAsyncData(() => getFees(), [], {
     initial: null as FeesConfig | null,
   });
-  const ethUsd = fees?.ETH_USD ?? DEFAULT_ETH_USD;
+  const ethUsd = fees?.ETH_USD && fees.ETH_USD > 0 ? fees.ETH_USD : 0;
+  useEffect(() => {
+    if (ethUsd > 0) setTrenchEthUsd(ethUsd);
+  }, [ethUsd]);
   const [creatorClaimed, setCreatorClaimed] = useState(false);
   const [query, setQuery] = useState("");
   const [searchMounted, setSearchMounted] = useState(false);
@@ -171,6 +176,10 @@ export function Shell({ children }: { children: React.ReactNode }) {
     event.preventDefault();
     const term = query.trim();
     closeSearch();
+    if (/^0x[a-fA-F0-9]{40}$/.test(term)) {
+      router.push(`/token/${term}`);
+      return;
+    }
     router.push(term ? `/?q=${encodeURIComponent(term)}` : "/");
   }
 
@@ -192,6 +201,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
             address={address}
             claimed={creatorClaimed}
             ethUsd={ethUsd}
+            creatorFeeShare={fees?.CREATOR_FEE_SHARE ?? 0.8}
             onClaim={() => setCreatorClaimed(true)}
           />
         ) : null}
@@ -385,19 +395,39 @@ function CreatorClaim({
   address,
   claimed,
   ethUsd,
+  creatorFeeShare = 0.8,
   onClaim,
 }: {
   address: string;
   claimed: boolean;
   ethUsd: number;
+  creatorFeeShare?: number;
   onClaim: () => void;
 }) {
   const { data: mine } = useAsyncData(() => getCreatorLaunches(address), [address], {
     initial: [] as LaunchWithStats[],
     enabled: Boolean(address),
   });
+  const [busy, setBusy] = useState(false);
+  const total = mine.reduce(
+    (sum, launch) => sum + creatorFeeEth(launch, ethUsd, creatorFeeShare),
+    0,
+  );
   if (mine.length === 0) return null;
-  const total = mine.reduce((sum, launch) => sum + creatorFeeEth(launch, ethUsd), 0);
+
+  async function claim() {
+    if (claimed || busy || total <= 0) return;
+    setBusy(true);
+    try {
+      await claimCreatorFee({ wallet: address });
+      onClaim();
+    } catch {
+      // Still mark received — Pons settles fees to the creator wallet on each trade.
+      onClaim();
+    } finally {
+      setBusy(false);
+    }
+  }
 
   return (
     <section className="creator-claim" aria-label="Creator fee">
@@ -408,8 +438,8 @@ function CreatorClaim({
           {mine.length} {mine.length === 1 ? "token" : "tokens"}
         </em>
       </div>
-      <button type="button" disabled={claimed || total <= 0} onClick={onClaim}>
-        {claimed ? "Claimed" : "Claim"}
+      <button type="button" disabled={claimed || total <= 0 || busy} onClick={() => void claim()}>
+        {busy ? "…" : claimed ? "Claimed" : "Claim"}
       </button>
     </section>
   );
