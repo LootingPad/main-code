@@ -3469,7 +3469,10 @@ tbody.page-swap {
 }
 
 .token-mark {
+  aspect-ratio: 1 / 1;
   border-radius: 18%;
+  object-fit: cover;
+  object-position: center;
 }
 
 .col-title {
@@ -5383,7 +5386,12 @@ textarea.field.tight {
 .token-head .token-mark {
   width: 64px;
   height: 64px;
+  aspect-ratio: 1 / 1;
+  flex: 0 0 64px;
   border-radius: 16px;
+  object-fit: cover;
+  object-position: center;
+  overflow: hidden;
 }
 
 .token-id {
@@ -5566,37 +5574,48 @@ textarea.field.tight {
 
 .token-metrics {
   display: grid;
-  grid-template-columns: 1.4fr 1fr 1fr;
-  gap: 8px;
+  grid-template-columns: 1.3fr 1fr 1fr 1fr;
+  gap: 0;
   margin-top: 18px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.03);
 }
 
 .token-metric {
-  border: 1px solid var(--line);
-  border-radius: 16px;
-  background: rgba(0, 0, 0, 0.22);
-  padding: 10px 12px 9px;
+  min-width: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 8px 12px;
+}
+
+.token-metric + .token-metric {
+  border-left: 1px solid rgba(255, 255, 255, 0.045);
 }
 
 .token-metric span {
   display: block;
   color: var(--muted);
-  font-size: 11px;
-  line-height: 1.2;
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  line-height: 1.15;
 }
 
 .token-metric strong {
   display: block;
   margin-top: 2px;
-  font-size: 16px;
+  font-size: 14px;
   font-variant-numeric: tabular-nums;
-  font-weight: 600;
+  font-weight: 650;
   line-height: 1.15;
 }
 
 .token-metric.hero strong {
   font-family: var(--font-display);
-  font-size: 20px;
+  font-size: 16px;
   letter-spacing: -0.03em;
 }
 
@@ -5606,6 +5625,48 @@ textarea.field.tight {
 
 .token-metric strong.is-down {
   color: var(--down);
+}
+
+.token-metric-ca {
+  min-width: 0;
+}
+
+.token-ca-copy {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  margin-top: 2px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  padding: 0;
+  cursor: pointer;
+  text-align: left;
+}
+
+.token-ca-copy strong {
+  margin-top: 0;
+  font-size: 14px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.token-ca-copy svg {
+  flex: 0 0 auto;
+  color: var(--muted);
+}
+
+.token-ca-copy:hover strong,
+.token-ca-copy:hover svg {
+  color: #ccff00;
+}
+
+.token-ca-copy:focus-visible {
+  outline: 1px solid rgba(204, 255, 0, 0.55);
+  outline-offset: 2px;
+  border-radius: 6px;
 }
 
 .token-chart {
@@ -5871,37 +5932,49 @@ textarea.field.tight {
   background: #ccff00;
 }
 
-.token-facts {
+.token-facts-strip {
   display: flex;
-  flex-direction: column;
-  margin: 14px 0 0;
-  overflow: hidden;
+  flex-wrap: nowrap;
+  gap: 0;
+  margin: 10px 0 0;
+  overflow-x: auto;
+  scrollbar-width: thin;
   border: 1px solid rgba(255, 255, 255, 0.06);
-  border-radius: 14px;
+  border-radius: 12px;
   background: rgba(255, 255, 255, 0.03);
+  -webkit-overflow-scrolling: touch;
+  scroll-snap-type: x proximity;
 }
 
-.token-facts > div {
+.token-facts-strip > div {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 9px 14px;
-  font-size: 13px;
+  flex: 1 0 auto;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 4.75rem;
+  padding: 7px 10px;
+  font-size: 11px;
+  line-height: 1.15;
+  scroll-snap-align: start;
 }
 
-.token-facts > div + div {
-  border-top: 1px solid rgba(255, 255, 255, 0.045);
+.token-facts-strip > div + div {
+  border-left: 1px solid rgba(255, 255, 255, 0.045);
 }
 
-.token-facts dt {
+.token-facts-strip dt {
   color: var(--muted);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
 }
 
-.token-facts dd {
+.token-facts-strip dd {
   margin: 0;
   font-variant-numeric: tabular-nums;
-  font-weight: 600;
+  font-weight: 650;
+  white-space: nowrap;
 }
 
 .token-trade {
@@ -6756,17 +6829,149 @@ textarea.field.tight {
 }
 
 @media (max-width: 720px) {
-  .fee-pair,
-  .token-metrics {
-    grid-template-columns: 1fr 1fr;
+  .token-page,
+  .token-stack,
+  .token-main {
+    min-width: 0;
+    max-width: 100%;
   }
 
-  .token-metric.hero {
-    grid-column: 1 / -1;
+  .fee-pair {
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+
+  .token-metrics {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    overflow: hidden;
+  }
+
+  .token-metric {
+    min-width: 0;
+    padding: 8px 10px;
+  }
+
+  .token-metric + .token-metric {
+    border-left: 0;
+  }
+
+  .token-metric:nth-child(even) {
+    border-left: 1px solid rgba(255, 255, 255, 0.045);
+  }
+
+  .token-metric:nth-child(n + 3) {
+    border-top: 1px solid rgba(255, 255, 255, 0.045);
+  }
+
+  .token-metric span {
+    font-size: 10px;
+  }
+
+  .token-metric strong,
+  .token-ca-copy strong {
+    font-size: 13px;
+  }
+
+  .token-metric.hero strong {
+    font-size: 14px;
+  }
+
+  .token-facts-strip {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    margin-top: 8px;
+    overflow: hidden;
+  }
+
+  .token-facts-strip > div {
+    min-width: 0;
+    padding: 7px 8px;
+    border-left: 0;
+    border-right: 1px solid rgba(255, 255, 255, 0.045);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.045);
+  }
+
+  .token-facts-strip > div:nth-child(3n) {
+    border-right: 0;
+  }
+
+  .token-facts-strip > div:nth-last-child(-n + 3):nth-child(3n + 1),
+  .token-facts-strip > div:nth-last-child(-n + 3):nth-child(3n + 1) ~ div {
+    border-bottom: 0;
+  }
+
+  .token-facts-strip dt {
+    font-size: 9px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .token-facts-strip dd {
+    font-size: 11px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .token-title h1 {
-    font-size: 22px;
+    font-size: 20px;
+  }
+}
+
+@media (max-width: 480px) {
+  .token-metrics,
+  .token-facts-strip {
+    border-radius: 10px;
+  }
+
+  .token-metric {
+    padding: 7px 8px;
+  }
+
+  .token-metric strong,
+  .token-ca-copy strong {
+    font-size: 12px;
+  }
+
+  .token-metric.hero strong {
+    font-size: 13px;
+  }
+
+  .token-ca-copy {
+    gap: 4px;
+  }
+
+  .token-ca-copy svg {
+    width: 12px;
+    height: 12px;
+  }
+
+  .token-facts-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .token-facts-strip > div {
+    padding: 6px 8px;
+  }
+
+  .token-facts-strip > div:nth-child(3n) {
+    border-right: 1px solid rgba(255, 255, 255, 0.045);
+  }
+
+  .token-facts-strip > div:nth-child(2n) {
+    border-right: 0;
+  }
+
+  .token-facts-strip > div:nth-last-child(-n + 3):nth-child(3n + 1),
+  .token-facts-strip > div:nth-last-child(-n + 3):nth-child(3n + 1) ~ div {
+    border-bottom: 1px solid rgba(255, 255, 255, 0.045);
+  }
+
+  .token-facts-strip > div:nth-last-child(-n + 2):nth-child(2n + 1),
+  .token-facts-strip > div:nth-last-child(-n + 2):nth-child(2n + 1) ~ div {
+    border-bottom: 0;
   }
 }
 
@@ -8413,9 +8618,11 @@ textarea.field.tight {
 
   .fee-pair {
     gap: 8px;
+    min-width: 0;
   }
 
   .fee-card {
+    min-width: 0;
     grid-template-columns: 20px minmax(0, 1fr);
     grid-template-areas:
       "icon label"
@@ -8468,9 +8675,24 @@ textarea.field.tight {
   }
 
   .token-head .token-mark {
-    width: 48px;
-    height: 48px;
-    border-radius: 14px;
+    width: 48px !important;
+    height: 48px !important;
+    aspect-ratio: 1 / 1;
+    flex: 0 0 48px;
+    max-width: 48px;
+    max-height: 48px;
+    border-radius: 14px !important;
+    object-fit: cover !important;
+    object-position: center;
+    overflow: hidden;
+  }
+
+  .token-head .token-mark img {
+    width: 100% !important;
+    height: 100% !important;
+    aspect-ratio: 1 / 1;
+    object-fit: cover !important;
+    object-position: center;
   }
 
   .token-title h1 {
@@ -9292,7 +9514,7 @@ textarea.field.tight {
 /* ?? $LOOTING token stats (/looting) ?? */
 .looting-token-page {
   display: grid;
-  gap: 14px;
+  gap: 12px;
   min-width: 0;
   container-type: inline-size;
   container-name: looting-token;
@@ -9300,11 +9522,131 @@ textarea.field.tight {
 
 .looting-token-hero {
   display: grid;
-  grid-template-columns: minmax(0, 1.4fr) minmax(180px, 0.7fr);
-  gap: 22px;
-  align-items: center;
-  padding: 22px 22px 20px;
+  gap: 0;
+  padding: 16px 18px 18px;
   min-width: 0;
+}
+
+.looting-token-hero-main {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 12px 16px;
+  align-items: start;
+  min-width: 0;
+}
+
+.looting-token-hero-copy {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding-top: 2px;
+}
+
+.looting-token-hero-title-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.looting-token-hero-title-row h1 {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: clamp(20px, 2.6vw, 24px);
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  line-height: 1.1;
+}
+
+.looting-token-hero-title-row h1 strong {
+  font-weight: 700;
+  color: #f2f2f2;
+}
+
+.looting-token-hero-desc {
+  margin: 0;
+  max-width: 62ch;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.45;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.looting-token-hero-desc .looting-token-hero-tag {
+  color: rgba(255, 255, 255, 0.4);
+  font-size: 12px;
+}
+
+.looting-token-socials {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.looting-social-chip {
+  display: inline-grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.03);
+  color: #e8e8e8;
+  text-decoration: none;
+  transition: border-color 160ms ease, background-color 160ms ease, color 160ms ease;
+}
+
+.looting-social-chip:hover {
+  border-color: rgba(204, 255, 0, 0.35);
+  background: rgba(204, 255, 0, 0.06);
+  color: #fff;
+}
+
+.looting-token-hero-side {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 10px;
+  min-width: 148px;
+  padding-top: 2px;
+}
+
+.looting-token-hero-spot {
+  text-align: right;
+}
+
+.looting-token-hero-spot strong {
+  display: block;
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  line-height: 1.15;
+  font-variant-numeric: tabular-nums;
+}
+
+.looting-token-hero-spot em {
+  display: block;
+  margin-top: 2px;
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 650;
+}
+
+.looting-token-hero-spot em.is-up {
+  color: var(--accent, #ccff00);
+}
+
+.looting-token-hero-spot em.is-down {
+  color: #ff4d4d;
 }
 
 .looting-token-empty {
@@ -9317,60 +9659,175 @@ textarea.field.tight {
   font-weight: 650;
 }
 
-.looting-token-checklist {
-  margin: 16px 0 0;
-  padding: 0;
-  list-style: none;
+.looting-token-empty .page-note {
+  margin: 0;
+}
+
+.looting-sk-logo {
+  width: 56px;
+  height: 56px;
+  border-radius: 14px;
+  flex: 0 0 56px;
+}
+
+.looting-sk-chip {
+  width: 118px;
+  height: 28px;
+  border-radius: 999px;
+}
+
+.looting-sk-desc {
   display: grid;
   gap: 8px;
+  max-width: 62ch;
 }
 
-.looting-token-checklist li {
-  position: relative;
-  padding-left: 18px;
+.looting-sk-value {
+  width: 64px;
+  height: 16px;
+  border-radius: 8px;
+}
+
+.looting-token-hero-spot strong .looting-sk-value {
+  width: 88px;
+  height: 22px;
+  margin-left: auto;
+}
+
+.looting-token-hero-spot em .looting-sk-value {
+  width: 52px;
+  height: 12px;
+  margin-top: 4px;
+  margin-left: auto;
+}
+
+.looting-board-cell .looting-sk-value {
+  width: 72px;
+  height: 18px;
+}
+
+.looting-chart-skeleton {
+  min-height: 240px;
+  display: grid;
+}
+
+.looting-sk-chart {
+  width: 100%;
+  height: 240px;
+  border-radius: 12px;
+}
+
+.looting-token-market {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.looting-token-board {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0;
+  margin-top: 16px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.03);
+  min-width: 0;
+}
+
+.looting-board-cell {
+  min-width: 0;
+  padding: 10px 14px;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+}
+
+.looting-board-cell:not(:nth-child(4n + 1)) {
+  border-left: 1px solid rgba(255, 255, 255, 0.045);
+}
+
+.looting-board-cell:nth-child(n + 5) {
+  border-top: 1px solid rgba(255, 255, 255, 0.045);
+}
+
+.looting-board-cell span {
+  display: block;
   color: var(--muted);
-  font-size: 13px;
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  line-height: 1.15;
+  text-transform: none;
 }
 
-.looting-token-checklist li::before {
-  content: "";
-  position: absolute;
-  left: 0;
-  top: 0.45em;
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--accent, #c8a24a);
-  opacity: 0.7;
+.looting-board-cell strong {
+  display: block;
+  margin-top: 2px;
+  color: inherit;
+  font-size: 14px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+  line-height: 1.15;
+  overflow-wrap: anywhere;
+}
+
+.looting-live-chart {
+  display: grid;
+  gap: 10px;
+  padding: 16px 18px;
+}
+
+.looting-live-chart-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.looting-live-chart-head h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 650;
+}
+
+.looting-live-chart-head p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.looting-chart-empty {
+  margin: 0;
+  padding: 28px 12px;
+  text-align: center;
+}
+
+.looting-live-chart .trade-chart {
+  border: 0;
+  background: transparent;
+  padding: 0;
 }
 
 .looting-token-kicker {
-  display: inline-block;
-  margin-bottom: 10px;
   color: var(--accent);
-  font-size: 12px;
+  font-size: inherit;
   font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
-.looting-token-hero-meta {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 10px;
+  letter-spacing: -0.03em;
+  text-transform: none;
 }
 
 .looting-ca-badge {
   display: inline-flex;
   align-items: center;
-  gap: 7px;
-  height: 36px;
+  gap: 6px;
+  height: 28px;
   max-width: 100%;
   border: 1px solid rgba(255, 255, 255, 0.14);
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.04);
-  padding: 0 12px 0 8px;
+  padding: 0 10px 0 6px;
   color: #e8e8e8;
   font: inherit;
   cursor: pointer;
@@ -9387,12 +9844,18 @@ textarea.field.tight {
   color: var(--accent);
 }
 
+.looting-token-hero-actions .claim-btn.is-soon {
+  opacity: 0.55;
+  cursor: default;
+  pointer-events: none;
+}
+
 .looting-ca-badge em {
   display: inline-grid;
   place-items: center;
-  min-width: 28px;
-  height: 20px;
-  padding: 0 6px;
+  min-width: 24px;
+  height: 18px;
+  padding: 0 5px;
   border-radius: 999px;
   background: rgba(204, 255, 0, 0.16);
   color: var(--accent);
@@ -9404,61 +9867,46 @@ textarea.field.tight {
 
 .looting-ca-badge code {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 12px;
-  font-weight: 650;
-  letter-spacing: -0.02em;
-}
-
-.looting-ca-toast {
-  color: var(--muted);
   font-size: 11px;
   font-weight: 650;
-}
-
-.looting-ca-badge.is-copied .looting-ca-toast {
-  color: var(--accent);
-}
-
-.looting-token-hero-copy h1 {
-  margin: 0 0 10px;
-  font-family: var(--font-display);
-  font-size: clamp(26px, 3.4vw, 36px);
-  font-weight: 700;
-  letter-spacing: -0.04em;
-  line-height: 1.1;
-}
-
-.looting-token-hero-copy p {
-  margin: 0 0 18px;
-  max-width: 52ch;
-  color: var(--muted);
-  font-size: 14px;
-  line-height: 1.55;
+  letter-spacing: -0.02em;
 }
 
 .looting-token-hero-actions {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 12px;
+  justify-content: flex-end;
+  gap: 8px;
 }
 
-.looting-token-hero-actions .claim-btn {
-  text-decoration: none;
-}
-
+.looting-token-hero-actions .claim-btn,
 .looting-hero-secondary {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   height: 36px;
-  padding: 0 14px;
-  border: 1px solid rgba(255, 255, 255, 0.14);
+  padding: 0 16px;
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.04);
-  color: #f2f2f2;
   font-size: 13px;
   font-weight: 650;
+  line-height: 1;
   text-decoration: none;
+  white-space: nowrap;
+  box-sizing: border-box;
+}
+
+.looting-token-hero-actions .claim-btn {
+  border: 0;
+  background: #ccff00;
+  color: #111;
+  font-family: var(--font-display);
+}
+
+.looting-hero-secondary {
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.04);
+  color: #f2f2f2;
   transition: border-color 160ms ease, background-color 160ms ease, color 160ms ease;
 }
 
@@ -9468,129 +9916,119 @@ textarea.field.tight {
   color: #fff;
 }
 
-.looting-token-hero-mark {
-  display: grid;
-  justify-items: center;
-  gap: 10px;
-  padding: 22px 18px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 18px;
-  background:
-    radial-gradient(ellipse at 50% 0%, rgba(204, 255, 0, 0.14), transparent 62%),
-    rgba(255, 255, 255, 0.03);
-}
-
-.looting-token-hero-mark strong {
-  font-size: 18px;
-  font-weight: 700;
-  letter-spacing: -0.02em;
-}
-
-.looting-token-hero-mark em {
-  color: var(--muted);
-  font-size: 12px;
-  font-style: normal;
-}
-
-.looting-token-spotlight {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
-}
-
 .looting-stat-card {
   display: grid;
-  gap: 8px;
-  padding: 18px 18px 16px;
+  gap: 6px;
+  padding: 12px 14px;
   min-width: 0;
 }
 
 .looting-stat-card span {
   color: var(--muted);
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
 }
 
 .looting-stat-card strong {
-  font-size: 26px;
+  font-size: 18px;
   font-weight: 700;
   letter-spacing: -0.03em;
   line-height: 1.1;
+  overflow-wrap: anywhere;
 }
 
-.looting-stat-card em {
-  color: var(--muted);
-  font-size: 12px;
-  font-style: normal;
-  line-height: 1.4;
+@container looting-token (max-width: 980px) {
+  .looting-token-hero-main {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .looting-token-hero-side {
+    grid-column: 1 / -1;
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    min-width: 0;
+    width: 100%;
+  }
+
+  .looting-token-hero-spot {
+    text-align: left;
+  }
+
+  .looting-token-hero-spot strong .looting-sk-value,
+  .looting-token-hero-spot em .looting-sk-value {
+    margin-left: 0;
+  }
+
+  .looting-token-hero-actions {
+    flex-shrink: 0;
+  }
 }
 
-.looting-token-metrics {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 12px;
-  min-width: 0;
+@container looting-token (max-width: 640px) {
+  .looting-token-hero {
+    padding: 14px;
+  }
+
+  .looting-token-hero-main {
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 10px 12px;
+  }
+
+  .looting-token-hero-side {
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .looting-token-hero-actions {
+    justify-content: flex-end;
+  }
+
+  .looting-token-hero-actions .claim-btn,
+  .looting-hero-secondary {
+    height: 34px;
+    padding: 0 14px;
+    font-size: 12px;
+  }
+
+  .looting-token-board {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 0;
+    border-radius: 12px;
+  }
+
+  .looting-board-cell {
+    padding: 8px 10px;
+  }
+
+  .looting-board-cell strong {
+    font-size: 13px;
+  }
 }
 
-.looting-token-metrics .looting-stat-card strong {
-  font-size: 22px;
-}
+@container looting-token (max-width: 420px) {
+  .looting-token-board {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 0;
+    border-radius: 10px;
+  }
 
-.looting-chart-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
-  min-width: 0;
-}
+  .looting-board-cell {
+    padding: 8px 6px;
+  }
 
-.looting-chart-card {
-  display: grid;
-  gap: 10px;
-  padding: 18px 18px 14px;
-  min-width: 0;
-}
+  .looting-board-cell span {
+    font-size: 9px;
+  }
 
-.looting-chart-card.looting-chart-wide {
-  grid-column: 1 / -1;
-}
-
-.looting-chart-card > header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 14px;
-}
-
-.looting-chart-card h2 {
-  margin: 0 0 4px;
-  font-size: 15px;
-  font-weight: 650;
-  letter-spacing: -0.02em;
-}
-
-.looting-chart-card header p {
-  margin: 0;
-  color: var(--muted);
-  font-size: 12px;
-  line-height: 1.4;
-}
-
-.looting-chart-kpi {
-  display: grid;
-  gap: 2px;
-  text-align: right;
-  flex-shrink: 0;
-}
-
-.looting-chart-kpi strong {
-  font-size: 22px;
-  font-weight: 700;
-  letter-spacing: -0.03em;
-  line-height: 1.1;
-}
-
-.looting-chart-kpi.accent strong {
-  color: var(--accent);
+  .looting-board-cell strong {
+    font-size: 12px;
+  }
 }
 
 .looting-chart-kpi span {
@@ -9633,12 +10071,12 @@ textarea.field.tight {
 .looting-token-chart header,
 .looting-token-calc header,
 .looting-token-history header,
-.looting-token-market article > header {
+.looting-token-market > header {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: 16px;
-  margin-bottom: 16px;
+  margin-bottom: 4px;
 }
 
 .looting-token-chart h2,
@@ -9827,18 +10265,33 @@ textarea.field.tight {
 
 .looting-token-market {
   display: grid;
-  grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr);
-  gap: 12px;
-  align-items: start;
+  gap: 14px;
+  padding: 18px 18px 16px;
+  min-width: 0;
 }
 
-.looting-token-market article {
-  padding: 18px 18px 16px;
+.looting-token-market > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.looting-token-market > header h2 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 650;
+}
+
+.looting-token-market > header p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .looting-token-market dl {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 1px;
   margin: 0;
   overflow: hidden;
@@ -9851,66 +10304,27 @@ textarea.field.tight {
   display: grid;
   gap: 6px;
   padding: 14px 16px;
-  background: #2a2a2a;
+  background: rgba(18, 18, 18, 0.72);
 }
 
 .looting-token-market dt {
   color: var(--muted);
-  font-size: 12px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
 }
 
 .looting-token-market dd {
   margin: 0;
-  font-size: 16px;
+  font-size: 15px;
   font-weight: 700;
   letter-spacing: -0.02em;
 }
 
-.looting-token-why ul {
-  display: grid;
-  gap: 8px;
-  margin: 14px 0;
-  padding: 0;
-  list-style: none;
-}
-
-.looting-token-why li {
-  position: relative;
-  padding-left: 16px;
-  color: #e8e8e8;
-  font-size: 13px;
-  line-height: 1.45;
-}
-
-.looting-token-why li::before {
-  content: "";
-  position: absolute;
-  top: 0.55em;
-  left: 0;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--accent);
-}
-
-.looting-token-why > p {
-  margin: 0;
-  color: var(--muted);
-  font-size: 13px;
-  line-height: 1.55;
-}
-
-.looting-token-disclaimer {
-  margin-top: 14px !important;
-  padding-top: 14px;
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
-  font-size: 11px !important;
-  line-height: 1.5 !important;
-}
-
 @container looting-token (max-width: 1080px) {
   .looting-token-metrics {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
   .looting-chart-grid {
@@ -9920,19 +10334,17 @@ textarea.field.tight {
   .looting-token-calc-out {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
-
-  .looting-token-hero {
-    grid-template-columns: minmax(0, 1fr) minmax(160px, 200px);
-  }
 }
 
 @container looting-token (max-width: 780px) {
-  .looting-token-hero,
-  .looting-token-spotlight,
+  .looting-token-identity,
   .looting-token-metrics,
-  .looting-token-calc-grid,
-  .looting-token-market {
+  .looting-token-calc-grid {
     grid-template-columns: 1fr;
+  }
+
+  .looting-token-market dl {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .looting-chart-card > header {
@@ -9956,24 +10368,30 @@ textarea.field.tight {
 }
 
 @container looting-token (max-width: 560px) {
+  .looting-token-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .looting-token-calc-out,
   .looting-token-market dl {
     grid-template-columns: 1fr;
   }
 
-  .looting-stat-card strong {
-    font-size: 20px;
+  .looting-token-hero {
+    padding: 16px;
   }
 }
 
 @media (max-width: 860px) {
-  .looting-token-hero,
-  .looting-token-spotlight,
+  .looting-token-identity,
   .looting-token-metrics,
   .looting-chart-grid,
-  .looting-token-calc-grid,
-  .looting-token-market {
+  .looting-token-calc-grid {
     grid-template-columns: 1fr;
+  }
+
+  .looting-token-market dl {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .looting-lwc,

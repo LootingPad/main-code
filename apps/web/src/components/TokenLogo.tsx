@@ -6,6 +6,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 const IPFS_GATEWAYS = [
   "https://ipfs.filebase.io/ipfs/",
   "https://4everland.io/ipfs/",
+  "https://cloudflare-ipfs.com/ipfs/",
   "https://nftstorage.link/ipfs/",
   "https://w3s.link/ipfs/",
   "https://dweb.link/ipfs/",
@@ -36,22 +37,30 @@ function logoSources(src: string): string[] {
   return [value];
 }
 
+function proxyUrl(address: string, attempt: number) {
+  const base = `/backend-api/trenches/image/${address}`;
+  return attempt <= 0 ? base : `${base}?r=${attempt}`;
+}
+
 export function TokenLogo({
   symbol,
   size = 32,
   src,
   address,
+  priority = false,
 }: {
   symbol: string;
   size?: number;
   src?: string | null;
   /** Loads the image through the API so ipfs and blocked CDNs still render. */
   address?: string;
+  /** Eager-load for above-the-fold marks (token page). */
+  priority?: boolean;
 }) {
   const tokenKey = (address || symbol || "").toLowerCase();
   const sources = useMemo(() => {
     const list = [
-      ...(address ? [`/backend-api/trenches/image/${address}`] : []),
+      ...(address ? [proxyUrl(address, 0)] : []),
       ...(src ? logoSources(src) : []),
     ];
     return [...new Set(list.filter(Boolean))];
@@ -59,6 +68,8 @@ export function TokenLogo({
 
   const [index, setIndex] = useState(0);
   const [lockedUrl, setLockedUrl] = useState<string | null>(null);
+  const [proxyAttempt, setProxyAttempt] = useState(0);
+  const [tick, setTick] = useState(0);
   const tokenRef = useRef(tokenKey);
 
   useEffect(() => {
@@ -66,23 +77,55 @@ export function TokenLogo({
     tokenRef.current = tokenKey;
     setLockedUrl(null);
     setIndex(0);
+    setProxyAttempt(0);
+    setTick(0);
   }, [tokenKey]);
 
-  const showUrl = lockedUrl ?? (index < sources.length ? sources[index] : null);
+  // Soft retry after gateway flaps — backend may have warmed the cache.
+  useEffect(() => {
+    if (lockedUrl || !address) return;
+    if (index < sources.length) return;
+    if (proxyAttempt >= 3) return;
+    const wait = 1200 * (proxyAttempt + 1);
+    const id = window.setTimeout(() => {
+      setProxyAttempt((n) => n + 1);
+      setIndex(0);
+      setTick((n) => n + 1);
+    }, wait);
+    return () => window.clearTimeout(id);
+  }, [address, index, lockedUrl, proxyAttempt, sources.length]);
+
+  const activeSources = useMemo(() => {
+    if (!address || proxyAttempt <= 0) return sources;
+    return [proxyUrl(address, proxyAttempt), ...sources.filter((url) => !url.includes("/trenches/image/"))];
+  }, [address, proxyAttempt, sources]);
+
+  const showUrl = lockedUrl ?? (index < activeSources.length ? activeSources[index] : null);
 
   if (showUrl) {
     return (
       // eslint-disable-next-line @next/next/no-img-element
       <img
-        key={showUrl}
+        key={`${showUrl}:${proxyAttempt}:${tick}`}
         src={showUrl}
         alt=""
         width={size}
         height={size}
         className="token-mark shrink-0"
-        style={{ width: size, height: size, borderRadius: 8, objectFit: "cover", background: "#111" }}
-        loading="lazy"
+        style={{
+          width: size,
+          height: size,
+          aspectRatio: "1 / 1",
+          borderRadius: 8,
+          objectFit: "cover",
+          objectPosition: "center",
+          background: "#111",
+          display: "block",
+          overflow: "hidden",
+        }}
+        loading={priority ? "eager" : "lazy"}
         decoding="async"
+        fetchPriority={priority ? "high" : "auto"}
         referrerPolicy="no-referrer"
         onLoad={() => setLockedUrl(showUrl)}
         onError={() => {
@@ -103,6 +146,7 @@ export function TokenLogo({
       style={{
         width: size,
         height: size,
+        aspectRatio: "1 / 1",
         borderRadius: 8,
         background: "#141414",
         border: "1px solid rgba(255,255,255,0.08)",
@@ -111,6 +155,8 @@ export function TokenLogo({
         justifyContent: "center",
         boxSizing: "border-box",
         padding: pad,
+        overflow: "hidden",
+        flexShrink: 0,
       }}
     >
       {/* eslint-disable-next-line @next/next/no-img-element */}

@@ -11,7 +11,7 @@ import {
   type LineData,
   type UTCTimestamp,
 } from "lightweight-charts";
-import { formatUsd } from "@/lib/format";
+import { formatPrice, formatUsd } from "@/lib/format";
 import type { TrenchCandle, TrenchTick } from "@/lib/trenches";
 
 const UP = "#ccff00";
@@ -171,7 +171,7 @@ export function CandleChart({
       lastValueVisible: false,
       crosshairMarkerVisible: true,
       crosshairMarkerRadius: 4,
-      priceFormat: { type: "custom", formatter: formatUsd, minMove: 0.01 },
+      priceFormat: { type: "custom", formatter: (v: number) => formatPrice(v).replace(/^\$/, ""), minMove: 0.000001 },
     });
     area.priceScale().applyOptions({ scaleMargins: { top: 0.08, bottom: 0.06 } });
     chart.subscribeCrosshairMove((param) => {
@@ -267,10 +267,10 @@ export function CandleChart({
         <>
           <div className="chart-ohlc">
             <b>{symbol}</b>
-            <span>{formatUsd(price)}</span>
+            <span>{formatPrice(price)}</span>
             <span className={up ? "is-up" : "is-down"}>
               {delta >= 0 ? "+" : ""}
-              {formatUsd(delta)} ({delta >= 0 ? "+" : ""}
+              {formatPrice(delta)} ({delta >= 0 ? "+" : ""}
               {pct.toFixed(2)}%)
             </span>
           </div>

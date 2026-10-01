@@ -63,5 +63,5 @@ export function formatCompactDecimal(value: number, maxSigDigits = 1): string {
   const sig = afterDot.slice(zeros).replace(/0+$/, "");
   if (!sig) return `${sign}0`;
   if (zeros < 3) return `${sign}0.${afterDot.slice(0, zeros + Math.min(sig.length, Math.max(1, maxSigDigits)))}`;
-  return `${sign}0.0${toSuperscript(zeros)}${sig.slice(0, Math.max(1, maxSigDigits))}`;
+  return `${sign}0.0${toSuperscript(zeros)}\u200A${sig.slice(0, Math.max(1, maxSigDigits))}`;
 }

@@ -263,6 +263,7 @@ export function Terminal({
   const [photo, setPhoto] = useState("");
   const [dataTab, setDataTab] = useState<"holders" | "tx">("holders");
   const [page, setPage] = useState(1);
+  const [caCopied, setCaCopied] = useState(false);
   const mineFromHolders = connected
     ? holders.find((row) => row.address.toLowerCase() === address.toLowerCase())
     : undefined;
@@ -829,9 +830,9 @@ export function Terminal({
       <section className="sheet token-main">
         <header className="token-head">
           {photo ? (
-            <img src={photo} alt="" className="token-mark object-cover" width={64} height={64} decoding="async" />
+            <img src={photo} alt="" className="token-mark object-cover" width={64} height={64} decoding="async" onError={() => setPhoto("")} />
           ) : (
-            <TokenLogo symbol={launch.symbol} size={64} src={launch.logoUrl} address={launch.address} />
+            <TokenLogo symbol={launch.symbol} size={64} src={launch.logoUrl} address={launch.address} priority />
           )}
           <div className="token-id">
             <div className="token-title">
@@ -936,7 +937,61 @@ export function Terminal({
               </>
             )}
           </div>
+          <div className="token-metric token-metric-ca">
+            <span>CA</span>
+            <button
+              type="button"
+              className="token-ca-copy"
+              onClick={async () => {
+                try {
+                  await navigator.clipboard.writeText(launch.address);
+                  setCaCopied(true);
+                  window.setTimeout(() => setCaCopied(false), 1600);
+                } catch {
+                  /* ignore */
+                }
+              }}
+              title={launch.address}
+              aria-label={caCopied ? "Contract address copied" : "Copy contract address"}
+            >
+              <strong>{caCopied ? "Copied" : shortAddress(launch.address)}</strong>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden>
+                <rect x="9" y="9" width="11" height="11" rx="2" stroke="currentColor" strokeWidth="1.8" />
+                <path
+                  d="M6 15H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v1"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  strokeLinecap="round"
+                />
+              </svg>
+            </button>
+          </div>
         </div>
+
+        <dl className="token-facts-strip" aria-label="Token facts">
+          <Fact label="Creator" value={shortAddress(launch.creator)} />
+          <Fact label="Creator tax" value={`${launch.creatorTax.toFixed(2)}%`} />
+          <Fact label="Creator keeps" value={`${creatorShare}%`} />
+          <Fact label="Lucky Boxes" value={`${launch.luckyShare}%`} />
+          {chain ? <Fact label="Age" value={stats.age} /> : null}
+          {chain ? <Fact label="Txns" value={stats.txns.toLocaleString("en-US")} /> : null}
+          {chain ? <Fact label="Holders" value={stats.holders.toLocaleString("en-US")} /> : null}
+          {chain ? <Fact label="ATH" value={formatUsd(stats.ath)} /> : null}
+          {meta?.pair ? <Fact label="Pair" value={meta.pair} /> : null}
+          {meta?.holders === "1" || meta?.holders === "0" ? <Fact label="Fees to" value={meta.holders === "1" ? "Holders" : "Creator"} /> : null}
+          {meta?.wallet ? <Fact label="Creator wallet" value={shortAddress(meta.wallet)} /> : null}
+          {launch.draft ? <Fact label="Launch fee" value="0.00085 ETH" /> : null}
+          {launch.draft ? (
+            <Fact
+              label={PONS_LAUNCH_WINDOW.label}
+              value={`${PONS_LAUNCH_WINDOW.shortValue} · snipe decay`}
+            />
+          ) : null}
+          {launch.draft ? (
+            <Fact label="Graduation" value={!meta?.pair || meta.pair === "ETH" ? "On-chain threshold" : `In ${meta.pair}`} />
+          ) : null}
+          {launch.draft ? <Fact label="Liquidity" value="Locked" /> : null}
+        </dl>
 
         <div className="token-chart">
           {chain ? (
@@ -955,32 +1010,6 @@ export function Terminal({
             <i style={{ width: `${launch.progress}%` }} />
           </div>
         </div>
-
-        <dl className="token-facts">
-          <Fact label="Creator" value={shortAddress(launch.creator)} />
-          <Fact label="Creator tax" value={`${launch.creatorTax.toFixed(2)}%`} />
-          <Fact label="Creator keeps" value={`${creatorShare}%`} />
-          <Fact label="Lucky Boxes" value={`${launch.luckyShare}%`} />
-          {chain ? <Fact label="Age" value={stats.age} /> : null}
-          {chain ? <Fact label="Txns" value={stats.txns.toLocaleString("en-US")} /> : null}
-          {chain ? <Fact label="Holders" value={stats.holders.toLocaleString("en-US")} /> : null}
-          {chain ? <Fact label="Bundlers" value={stats.bundlers.toLocaleString("en-US")} /> : null}
-          {chain ? <Fact label="ATH" value={formatUsd(stats.ath)} /> : null}
-          {meta?.pair ? <Fact label="Pair" value={meta.pair} /> : null}
-          {meta?.holders === "1" || meta?.holders === "0" ? <Fact label="Fees to" value={meta.holders === "1" ? "Holders" : "Creator"} /> : null}
-          {meta?.wallet ? <Fact label="Creator wallet" value={shortAddress(meta.wallet)} /> : null}
-          {launch.draft ? <Fact label="Launch fee" value="0.00085 ETH" /> : null}
-          {launch.draft ? (
-            <Fact
-              label={PONS_LAUNCH_WINDOW.label}
-              value={`${PONS_LAUNCH_WINDOW.shortValue} · snipe decay`}
-            />
-          ) : null}
-          {launch.draft ? (
-            <Fact label="Graduation" value={!meta?.pair || meta.pair === "ETH" ? "On-chain threshold" : `In ${meta.pair}`} />
-          ) : null}
-          {launch.draft ? <Fact label="Liquidity" value="Locked" /> : null}
-        </dl>
       </section>
 
       <section className="sheet holder-card">

@@ -1,13 +1,4 @@
-/** $LOOTING dashboard types — live series land here after CA + fee path (no seed data). */
-
-export const LOOTING_TOKEN = {
-  symbol: "LOOTING",
-  name: "LOOTING",
-  tagline: "$LOOTING powers the Robinhood Chain launchpad",
-  blurb:
-    "Protocol burn share from LOOTING launches is tracked here once the token CA and fee routing are live.",
-  address: "",
-} as const;
+/** Shared types for $LOOTING dashboard. Live series come from `/api/looting-token`. */
 
 export type LootingBurnRow = {
   id: string;
@@ -35,9 +26,3 @@ export type LootingChartPoint = {
   burnUsd: number;
   feeUsd: number;
 };
-
-export const lootingBurnHistory: LootingBurnRow[] = [];
-export const lootingDailyBurnSeries: LootingTimePoint[] = [];
-export const lootingRevenueAllocSeries: LootingTimePoint[] = [];
-export const lootingWalletSeries: LootingWalletPoint[] = [];
-export const lootingCumulativeSeries: LootingChartPoint[] = [];

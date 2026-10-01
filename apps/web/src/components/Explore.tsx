@@ -450,8 +450,8 @@ export function Explore() {
 
   const [windowId, setWindowId] = useState<WindowId>("latest");
   const [windowTab, setWindowTab] = useState<WindowId>("latest");
-  const [view, setView] = useState<"table" | "grid">("table");
-  const [viewTab, setViewTab] = useState<"table" | "grid">("table");
+  const [view, setView] = useState<"table" | "grid">("grid");
+  const [viewTab, setViewTab] = useState<"table" | "grid">("grid");
   const [tablePage, setTablePage] = useState(1);
   const [gridPage, setGridPage] = useState(1);
   const [pageOut, setPageOut] = useState(false);

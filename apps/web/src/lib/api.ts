@@ -108,6 +108,44 @@ export async function getFees() {
   return apiGetData<FeesConfig>("/api/fees");
 }
 
+/** Public $LOOTING site config (CA + copy) from admin + live market + OHLCV. */
+export async function getLootingTokenConfig() {
+  return apiGetData<{
+    address: string;
+    symbol: string;
+    name: string;
+    logo: string;
+    description?: string;
+    tagline: string;
+    blurb: string;
+    burnAllocationPct: number;
+    asOf: string | null;
+    updatedAt: string;
+    socials?: {
+      twitter?: string;
+      telegram?: string;
+      discord?: string;
+      website?: string;
+      farcaster?: string;
+    };
+    market: {
+      priceUsd: number | null;
+      marketCap: number | null;
+      fdv: number | null;
+      volume24h: number | null;
+      liquidity: number | null;
+      change24h: number | null;
+      holders: number | null;
+      circulating: number | null;
+      totalSupply: number | null;
+      burned: number | null;
+      burnedUsd: number | null;
+      asOf: string;
+    } | null;
+    candles: Array<{ t: number; o: number; h: number; l: number; c: number; v: number }>;
+  }>("/api/looting-token");
+}
+
 export async function prepareTrade(body: {
   token: string;
   side: "buy" | "sell";
