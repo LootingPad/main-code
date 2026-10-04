@@ -243,6 +243,107 @@ export async function uploadMedia(dataUrl: string) {
   return response.data;
 }
 
+const CONFIRM_TIMEOUT = 90_000;
+
+export type PreparedCall = {
+  actionId: string;
+  tx: { to: `0x${string}`; data: `0x${string}`; value: string };
+  approveTx?: { to: `0x${string}`; data: `0x${string}`; value: string } | null;
+  needsApproval?: boolean;
+  feeWei?: string;
+};
+
+function postAction<T>(path: string, body: unknown, timeout = 30_000) {
+  return apiFetch<T>(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(timeout),
+  });
+}
+
+export function prepareCreateStaking(body: {
+  wallet: string;
+  stakeToken: string;
+  rewardAmount: string;
+  endsAt: number;
+  lockMask: number;
+  aprBps: [number, number, number];
+  idempotencyKey: string;
+}) {
+  return postAction<PreparedCall>("/api/staking/events/prepare", body);
+}
+
+export function confirmCreateStaking(body: { actionId: string; txHash: string }) {
+  return postAction<{ status: string; txHash?: string }>("/api/staking/events/confirm", body, CONFIRM_TIMEOUT);
+}
+
+export function prepareStake(body: {
+  wallet: string;
+  vaultId: string;
+  amount: string;
+  lock: string;
+  idempotencyKey: string;
+}) {
+  return postAction<PreparedCall>("/api/staking/stake/prepare", body);
+}
+
+export function confirmStake(body: { actionId: string; txHash: string }) {
+  return postAction<{ status: string; txHash?: string }>("/api/staking/stake/confirm", body, CONFIRM_TIMEOUT);
+}
+
+export function prepareUnstake(body: {
+  wallet: string;
+  vaultId: string;
+  amount: string;
+  lock: string;
+  idempotencyKey: string;
+}) {
+  return postAction<PreparedCall>("/api/staking/unstake/prepare", body);
+}
+
+export function confirmUnstake(body: { actionId: string; txHash: string }) {
+  return postAction<{ status: string; txHash?: string }>("/api/staking/unstake/confirm", body, CONFIRM_TIMEOUT);
+}
+
+export function prepareStakingClaim(body: {
+  wallet: string;
+  vaultId: string;
+  lock: string;
+  idempotencyKey: string;
+}) {
+  return postAction<PreparedCall>("/api/staking/claim/prepare", body);
+}
+
+export function confirmStakingClaim(body: { actionId: string; txHash: string }) {
+  return postAction<{ status: string; txHash?: string }>("/api/staking/claim/confirm", body, CONFIRM_TIMEOUT);
+}
+
+export function prepareDevLock(body: {
+  wallet: string;
+  token: string;
+  amount: string;
+  mode: "time" | "vest";
+  unlockAt: number;
+  cliffAt?: number;
+  cadence?: number;
+  idempotencyKey: string;
+}) {
+  return postAction<PreparedCall>("/api/devlock/prepare", body);
+}
+
+export function confirmDevLock(body: { actionId: string; txHash: string }) {
+  return postAction<{ status: string; txHash?: string }>("/api/devlock/confirm", body, CONFIRM_TIMEOUT);
+}
+
+export function prepareDevLockClaim(body: { wallet: string; lockId: string; idempotencyKey: string }) {
+  return postAction<PreparedCall>("/api/devlock/claim/prepare", body);
+}
+
+export function confirmDevLockClaim(body: { actionId: string; txHash: string }) {
+  return postAction<{ status: string; txHash?: string }>("/api/devlock/claim/confirm", body, CONFIRM_TIMEOUT);
+}
+
 export async function confirmLaunch(body: { actionId: string; txHash: string }) {
   return apiFetch<{
     status: string;

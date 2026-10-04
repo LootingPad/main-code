@@ -2,7 +2,22 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
-import { getLaunches, getStakingEvents, getWalletStakingPositions } from "@/lib/api";
+import { useAppKitNetwork, useAppKitProvider } from "@reown/appkit/react";
+import type { Address, EIP1193Provider } from "viem";
+import {
+  ApiError,
+  confirmStake,
+  confirmStakingClaim,
+  confirmUnstake,
+  getLaunches,
+  getStakingEvents,
+  getWalletStakingPositions,
+  prepareStake,
+  prepareStakingClaim,
+  prepareUnstake,
+} from "@/lib/api";
+import { robinhoodChain } from "@/lib/chains";
+import { actionTxHash, isUserRejection, providerErrorText, readTokenHolding, sendWalletCalls, toRawAmount } from "@/lib/wallet-calls";
 import { formatCount, formatUsd, shortAddress } from "@/lib/format";
 import {
   DAY,
@@ -25,8 +40,6 @@ import { useWallet } from "./Wallet";
 
 type Tab = "events" | "positions";
 
-const YEAR_SECONDS = 365 * 24 * 60 * 60;
-const EARN_PACE = 360;
 const EVENTS_PER_PAGE = 10;
 const POSITIONS_PER_PAGE = 10;
 
@@ -34,8 +47,29 @@ function formatLive(value: number) {
   return value.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
-function earnPerSecond(stakedAmount: number, rate: number) {
-  return ((stakedAmount * (rate / 100)) / YEAR_SECONDS) * EARN_PACE;
+function activeChainId(value: number | string | undefined) {
+  if (typeof value === "number") return value;
+  if (typeof value === "string" && value.startsWith("0x")) return Number.parseInt(value, 16);
+  return Number(value);
+}
+
+function unstakeBlocked(position: StakingPosition | null) {
+  if (!position || position.lock === "flex") return false;
+  if (!position.started) return true;
+  const days = position.lock === "30" ? 30 : 90;
+  return Date.now() < position.started + days * DAY;
+}
+
+function actionError(err: unknown) {
+  if (isUserRejection(err)) return "Transaction cancelled.";
+  if (err instanceof ApiError) {
+    if (err.status === 503 || err.code === "CONTRACTS_NOT_CONFIGURED") {
+      return "Staking contracts are not configured yet.";
+    }
+    return err.message || err.code;
+  }
+  const text = providerErrorText(err);
+  return text ? text.slice(0, 180) : "Staking action failed.";
 }
 
 function tokenPrice(symbol: string, event: StakingEvent | undefined, launches: { symbol: string; priceUsd: number }[]) {
@@ -47,37 +81,35 @@ function tokenPrice(symbol: string, event: StakingEvent | undefined, launches: {
 
 export function Staking() {
   const { connected, connect, address } = useWallet();
+  const { walletProvider } = useAppKitProvider<EIP1193Provider>("eip155");
+  const { chainId, switchNetwork } = useAppKitNetwork();
   const searchParams = useSearchParams();
   const [tab, setTab] = useState<Tab>("events");
-  const { data: events } = useAsyncData(() => getStakingEvents({ limit: 100 }), [], { initial: [] });
-  const { data: apiPositions } = useAsyncData(
+  const { data: events, reload: reloadEvents } = useAsyncData(() => getStakingEvents({ limit: 100 }), [], { initial: [] });
+  const { data: apiPositions, reload: reloadPositions } = useAsyncData(
     () => getWalletStakingPositions(address),
     [address],
     { initial: [], enabled: connected },
   );
   const { data: launches } = useAsyncData(() => getLaunches({ limit: 100 }), [], { initial: [] });
-  const [positionEdits, setPositionEdits] = useState<Record<string, StakingPosition>>({});
   const [activeEventId, setActiveEventId] = useState<string | null>(null);
   const [activePositionId, setActivePositionId] = useState<string | null>(null);
   const [side, setSide] = useState<"stake" | "unstake">("stake");
   const [lock, setLock] = useState<StakingLockId>("30");
   const [amount, setAmount] = useState("");
-  const [balances, setBalances] = useState<Record<string, number>>({});
+  const [walletBalance, setWalletBalance] = useState(0);
+  const [tokenDecimals, setTokenDecimals] = useState(18);
   const [notice, setNotice] = useState("");
-  const [elapsed, setElapsed] = useState(0);
+  const [busy, setBusy] = useState(false);
+  const inflight = useRef(false);
   const [eventPage, setEventPage] = useState(1);
   const [positionPage, setPositionPage] = useState(1);
-  const bankedRef = useRef(0);
-  const anchorRef = useRef(0);
-  const perSecRef = useRef(0);
   const openedPoolRef = useRef<string | null>(null);
 
   const positions = useMemo(() => {
     if (!connected) return [];
-    return apiPositions
-      .map((item) => positionEdits[item.id] ?? item)
-      .filter((item) => item.amount > 0);
-  }, [connected, apiPositions, positionEdits]);
+    return apiPositions.filter((item) => item.amount > 0);
+  }, [connected, apiPositions]);
 
   const activeEvent = useMemo(() => {
     if (activeEventId) return events.find((item) => item.id === activeEventId) ?? null;
@@ -95,12 +127,19 @@ export function Staking() {
   const availableLocks = targetEvent?.locks ?? STAKING_LOCK_OPTIONS.map((item) => item.id);
   const selectedLock = availableLocks.includes(lock) ? lock : (availableLocks[0] as StakingLockId);
   const rate = lockRate(selectedLock);
-  const walletBalance = balances[symbol] ?? 0;
   const stakedAmount = activePosition?.amount ?? 0;
   const cap = side === "stake" ? walletBalance : stakedAmount;
   const parsed = Number(amount.replace(/,/g, ""));
   const value = Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
-  const ready = connected && Boolean(targetEvent) && value > 0 && value <= cap;
+  const eventEnded = Boolean(targetEvent && targetEvent.ends <= Date.now());
+  const lockedOut = side === "unstake" && unstakeBlocked(activePosition);
+  const ready =
+    connected &&
+    Boolean(targetEvent) &&
+    value > 0 &&
+    value <= cap &&
+    !(side === "stake" && eventEnded) &&
+    !lockedOut;
 
   const totalStaked = positions.reduce((sum, item) => sum + item.amount, 0);
   const totalStakedUsd = positions.reduce((sum, item) => {
@@ -118,31 +157,13 @@ export function Staking() {
     safePositionPage * POSITIONS_PER_PAGE,
   );
   const livePosition = activePosition;
-  const perSec = livePosition ? earnPerSecond(livePosition.amount, lockRate(livePosition.lock)) : 0;
-  const liveClaimable = livePosition ? livePosition.claimable + bankedRef.current + elapsed * perSec : 0;
+  const chainClaimable = livePosition?.claimable ?? 0;
 
   useEffect(() => {
     if (!availableLocks.includes(lock) && availableLocks[0]) {
       setLock(availableLocks[0] as StakingLockId);
     }
   }, [availableLocks, lock]);
-
-  useEffect(() => {
-    const now = performance.now();
-    if (anchorRef.current) {
-      bankedRef.current += ((now - anchorRef.current) / 1000) * perSecRef.current;
-    }
-    anchorRef.current = now;
-    perSecRef.current = perSec;
-    setElapsed(0);
-  }, [perSec, activePositionId]);
-
-  useEffect(() => {
-    const timer = window.setInterval(() => {
-      setElapsed((performance.now() - anchorRef.current) / 1000);
-    }, 80);
-    return () => window.clearInterval(timer);
-  }, []);
 
   const openStake = (event: StakingEvent) => {
     setActiveEventId(event.id);
@@ -178,42 +199,126 @@ export function Staking() {
     setNotice("");
   };
 
-  const patchPosition = (id: string, next: StakingPosition | null) => {
-    setPositionEdits((current) => {
-      if (!next) {
-        const copy = { ...current };
-        delete copy[id];
-        return copy;
-      }
-      return { ...current, [id]: next };
-    });
-  };
+  const tokenAddress = targetEvent?.address ?? activePosition?.address ?? "";
 
-  const submit = () => {
+  useEffect(() => {
+    if (!connected || !address || !tokenAddress) {
+      setWalletBalance(0);
+      return;
+    }
+    let stop = false;
+    void readTokenHolding(tokenAddress as Address, address as Address)
+      .then((holding) => {
+        if (stop) return;
+        setWalletBalance(holding.ui);
+        setTokenDecimals(holding.decimals);
+      })
+      .catch(() => {
+        if (!stop) setWalletBalance(0);
+      });
+    return () => {
+      stop = true;
+    };
+  }, [connected, address, tokenAddress]);
+
+  const submit = async () => {
     if (!connected) {
       connect();
       return;
     }
     if (!targetEvent || !ready) {
-      setNotice(value > cap ? "Amount is above the available balance." : "Enter an amount above 0.");
+      if (side === "stake" && eventEnded) setNotice("This event has ended.");
+      else if (lockedOut) setNotice("This lock has not finished yet.");
+      else setNotice(value > cap ? "Amount is above the available balance." : "Enter an amount above 0.");
       return;
     }
-    setNotice("On-chain stake is not wired yet — no demo positions are created.");
-    setAmount("");
+    if (!walletProvider) {
+      setNotice("Wallet is not ready.");
+      return;
+    }
+    if (inflight.current) return;
+    inflight.current = true;
+    setBusy(true);
+    setNotice("");
+    try {
+      if (activeChainId(chainId) !== robinhoodChain.id) await switchNetwork(robinhoodChain);
+      const raw = toRawAmount(amount, tokenDecimals);
+      const lockId = side === "unstake" && activePosition ? activePosition.lock : selectedLock;
+      const prepared =
+        side === "stake"
+          ? await prepareStake({
+              wallet: address,
+              vaultId: targetEvent.id,
+              amount: raw,
+              lock: lockId,
+              idempotencyKey: crypto.randomUUID(),
+            })
+          : await prepareUnstake({
+              wallet: address,
+              vaultId: targetEvent.id,
+              amount: raw,
+              lock: lockId,
+              idempotencyKey: crypto.randomUUID(),
+            });
+      const calls = [prepared.approveTx, prepared.tx].filter((call): call is NonNullable<typeof call> => Boolean(call));
+      const hashes = await sendWalletCalls(walletProvider, address as Address, calls);
+      const confirmed =
+        side === "stake"
+          ? await confirmStake({ actionId: prepared.actionId, txHash: actionTxHash(hashes) })
+          : await confirmUnstake({ actionId: prepared.actionId, txHash: actionTxHash(hashes) });
+      setAmount("");
+      setNotice(`${side === "stake" ? "Stake" : "Unstake"} submitted${confirmed.txHash ? ` · ${confirmed.txHash.slice(0, 10)}` : ""}.`);
+      reloadEvents();
+      reloadPositions();
+    } catch (err) {
+      setNotice(actionError(err));
+    } finally {
+      inflight.current = false;
+      setBusy(false);
+    }
   };
 
-  const claim = () => {
+  const claim = async () => {
     if (!connected) {
       connect();
       return;
     }
-    setNotice("On-chain claim is not wired yet.");
+    if (!targetEvent || !activePosition || activePosition.claimable <= 0) {
+      setNotice("Nothing to claim yet.");
+      return;
+    }
+    if (!walletProvider) {
+      setNotice("Wallet is not ready.");
+      return;
+    }
+    if (inflight.current) return;
+    inflight.current = true;
+    setBusy(true);
+    setNotice("");
+    try {
+      if (activeChainId(chainId) !== robinhoodChain.id) await switchNetwork(robinhoodChain);
+      const prepared = await prepareStakingClaim({
+        wallet: address,
+        vaultId: targetEvent.id,
+        lock: activePosition.lock,
+        idempotencyKey: crypto.randomUUID(),
+      });
+      const hashes = await sendWalletCalls(walletProvider, address as Address, [prepared.tx]);
+      const confirmed = await confirmStakingClaim({ actionId: prepared.actionId, txHash: actionTxHash(hashes) });
+      setNotice(`Claim submitted${confirmed.txHash ? ` · ${confirmed.txHash.slice(0, 10)}` : ""}.`);
+      reloadPositions();
+    } catch (err) {
+      setNotice(actionError(err));
+    } finally {
+      inflight.current = false;
+      setBusy(false);
+    }
   };
 
   return (
     <div className="staking-page">
       <div className="page-head">
-        <PageTitle tip="Public pools from token creators. Stake in Events, manage what you hold in Positions. Staking contracts are not deployed yet — Events stay empty until StakingFactory is live.">
+        <PageTitle tip="Public pools from token creators. Stake in Events, manage what you hold in Positions. New rows show up after the indexer sees the transaction.">
           Staking
         </PageTitle>
         <SlidingTabs
@@ -459,8 +564,8 @@ export function Staking() {
 
                 <div className="staking-form-spacer" aria-hidden />
 
-                <button type="button" className="staking-submit" onClick={submit}>
-                  {connected ? (side === "stake" ? `Stake ${symbol}` : `Unstake ${symbol}`) : "Connect"}
+                <button type="button" className="staking-submit" onClick={() => void submit()} disabled={busy}>
+                  {busy ? "Confirm in wallet…" : connected ? (side === "stake" ? `Stake ${symbol}` : `Unstake ${symbol}`) : "Connect"}
                 </button>
               </>
             ) : (
@@ -489,20 +594,25 @@ export function Staking() {
                   <em>Total USD</em>
                 </article>
               </div>
-              <article className={`sheet staking-earn${perSec > 0 ? " is-live" : ""}`}>
+              <article className={`sheet staking-earn${chainClaimable > 0 ? " is-live" : ""}`}>
                 <header className="earn-head">
                   <span className="earn-live">
-                    {perSec > 0 ? <span className="earn-dot" /> : null}
+                    {chainClaimable > 0 ? <span className="earn-dot" /> : null}
                     Claimable
                   </span>
                   <em>{livePosition ? symbol : "—"}</em>
                 </header>
                 <strong>
-                  {livePosition ? formatLive(liveClaimable) : "0.00"}
+                  {livePosition ? formatLive(chainClaimable) : "0.00"}
                   {livePosition ? ` ${symbol}` : ""}
                 </strong>
-                <button type="button" className="claim-btn" disabled={!livePosition || liveClaimable <= 0} onClick={claim}>
-                  {liveClaimable > 0 ? "Claim" : "Claimed"}
+                <button
+                  type="button"
+                  className="claim-btn"
+                  disabled={busy || !livePosition || chainClaimable <= 0}
+                  onClick={() => void claim()}
+                >
+                  {chainClaimable > 0 ? "Claim" : "Claimed"}
                 </button>
               </article>
             </section>

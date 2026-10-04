@@ -1,7 +1,11 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { getFees, getLaunches, getWalletDevLocks } from "@/lib/api";
+import { useAppKitNetwork, useAppKitProvider } from "@reown/appkit/react";
+import type { Address, EIP1193Provider } from "viem";
+import { ApiError, confirmDevLock, confirmDevLockClaim, getFees, getLaunches, getWalletDevLocks, prepareDevLock, prepareDevLockClaim } from "@/lib/api";
+import { robinhoodChain } from "@/lib/chains";
+import { actionTxHash, isUserRejection, providerErrorText, readTokenHolding, sendWalletCalls, toRawAmount } from "@/lib/wallet-calls";
 import { DEV_LOCK_FEE_ETH } from "@/lib/fees";
 import type { Cadence, DevLock, DevLockMode, Launch } from "@/lib/types";
 import { useAsyncData } from "@/lib/use-async-data";
@@ -90,7 +94,28 @@ function vestedAmount(lock: Lock, now = Date.now()) {
   return lock.amount * ((now - lock.cliff) / span);
 }
 
+const CADENCE_ID: Record<Cadence, number> = { day: 0, week: 1, month: 2 };
+
+function activeChainId(value: number | string | undefined) {
+  if (typeof value === "number") return value;
+  if (typeof value === "string" && value.startsWith("0x")) return Number.parseInt(value, 16);
+  return Number(value);
+}
+
+function actionError(err: unknown) {
+  if (isUserRejection(err)) return "Transaction cancelled.";
+  if (err instanceof ApiError) {
+    if (err.status === 503 || err.code === "CONTRACTS_NOT_CONFIGURED") {
+      return "Dev Lock is not configured yet.";
+    }
+    return err.message || err.code;
+  }
+  const text = providerErrorText(err);
+  return text ? text.slice(0, 180) : "Dev Lock action failed.";
+}
+
 function claimableAmount(lock: Lock) {
+  if (typeof lock.claimable === "number") return Math.max(0, lock.claimable);
   return Math.max(0, vestedAmount(lock) - lock.claimed);
 }
 
@@ -488,8 +513,10 @@ function drawPadlockIcon(
 
 export function DevLock() {
   const { connected, address, connect } = useWallet();
+  const { walletProvider } = useAppKitProvider<EIP1193Provider>("eip155");
+  const { chainId, switchNetwork } = useAppKitNetwork();
   const { data: launches } = useAsyncData(() => getLaunches({ limit: 100 }), [], { initial: [] });
-  const { data: apiLocks } = useAsyncData(
+  const { data: apiLocks, reload: reloadLocks } = useAsyncData(
     () => getWalletDevLocks(address),
     [address],
     { initial: [], enabled: connected },
@@ -508,10 +535,10 @@ export function DevLock() {
   const [length, setLength] = useState<(typeof LENGTHS)[number]["id"]>("365");
   const [cadence, setCadence] = useState<Cadence>("month");
   const [balances, setBalances] = useState<Record<string, number>>({});
-  const [localLocks, setLocalLocks] = useState<Lock[]>([]);
-  const [lockEdits, setLockEdits] = useState<Record<string, Lock>>({});
-  const [hiddenLockIds, setHiddenLockIds] = useState<string[]>([]);
+  const [decimalsBySymbol, setDecimalsBySymbol] = useState<Record<string, number>>({});
   const [notice, setNotice] = useState("");
+  const [busy, setBusy] = useState(false);
+  const inflight = useRef(false);
   const [shareLock, setShareLock] = useState<Lock | null>(null);
   const [lockPage, setLockPage] = useState(1);
   const [tokenOpen, setTokenOpen] = useState(false);
@@ -527,19 +554,47 @@ export function DevLock() {
     if (!symbol && coins[0]) setSymbol(coins[0].symbol);
   }, [symbol, coins]);
 
-  const locks = useMemo(() => {
-    if (!connected) return localLocks;
-    const hidden = new Set(hiddenLockIds);
-    const apiMerged = apiLocks
-      .filter((item) => !hidden.has(item.id))
-      .map((item) => lockEdits[item.id] ?? item);
-    const apiIds = new Set(apiMerged.map((item) => item.id));
-    const locals = localLocks.filter((item) => !apiIds.has(item.id) && !hidden.has(item.id));
-    return [...locals, ...apiMerged];
-  }, [connected, apiLocks, localLocks, lockEdits, hiddenLockIds]);
+  const locks = useMemo(() => (connected ? apiLocks : []), [connected, apiLocks]);
 
   const coin = coins.find((item) => item.symbol === symbol) ?? coins[0];
   const balance = coin ? (balances[coin.symbol] ?? 0) : 0;
+  const tokenDecimals = coin ? (decimalsBySymbol[coin.symbol] ?? 18) : 18;
+
+  useEffect(() => {
+    if (!connected || !address || coins.length === 0) {
+      setBalances({});
+      return;
+    }
+    let stop = false;
+    void Promise.all(
+      coins.map(async (item) => {
+        try {
+          const holding = await readTokenHolding(item.address as Address, address as Address);
+          return { symbol: item.symbol, ui: holding.ui, decimals: holding.decimals };
+        } catch {
+          return null;
+        }
+      }),
+    )
+      .then((rows) => {
+        if (stop) return;
+        const nextBalances: Record<string, number> = {};
+        const nextDecimals: Record<string, number> = {};
+        for (const row of rows) {
+          if (!row) continue;
+          nextBalances[row.symbol] = row.ui;
+          nextDecimals[row.symbol] = row.decimals;
+        }
+        setBalances(nextBalances);
+        setDecimalsBySymbol(nextDecimals);
+      })
+      .catch(() => {
+        if (!stop) setBalances({});
+      });
+    return () => {
+      stop = true;
+    };
+  }, [connected, address, coins]);
   const parsed = Number(amount.replace(/,/g, ""));
   const value = Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
 
@@ -550,7 +605,8 @@ export function DevLock() {
   const presetDays = TIME_PRESETS.find((item) => item.id === preset)?.days ?? 90;
   const customMs = parseDate(customDate);
   const unlockAt = mode === "time" ? (preset === "custom" ? customMs : now + presetDays * DAY) : now + (cliffDays + lengthDays) * DAY;
-  const cliffAt = mode === "vest" ? now + cliffDays * DAY : now;
+  // No-cliff vesting must still be >= block time when the tx is included.
+  const cliffAt = mode === "vest" ? now + cliffDays * DAY + (cliffDays === 0 ? 120_000 : 0) : now;
   const periods = Math.max(1, Math.round(lengthDays / cadenceDays));
   const perSlice = value > 0 ? value / periods : 0;
   const dateOk = Number.isFinite(unlockAt) && unlockAt > now;
@@ -608,7 +664,7 @@ export function DevLock() {
     setNotice("");
   };
 
-  const submit = () => {
+  const submit = async () => {
     if (!connected) {
       connect();
       return;
@@ -619,15 +675,73 @@ export function DevLock() {
       else setNotice("Enter an amount above 0.");
       return;
     }
-    setNotice("On-chain Dev Lock is not wired yet — no demo locks are created.");
+    if (!walletProvider) {
+      setNotice("Wallet is not ready.");
+      return;
+    }
+    if (inflight.current) return;
+    inflight.current = true;
+    setBusy(true);
+    setNotice("");
+    try {
+      if (activeChainId(chainId) !== robinhoodChain.id) await switchNetwork(robinhoodChain);
+      const prepared = await prepareDevLock({
+        wallet: address,
+        token: coin.address,
+        amount: toRawAmount(amount, tokenDecimals),
+        mode,
+        unlockAt: Math.floor(unlockAt / 1000),
+        cliffAt: Math.floor(cliffAt / 1000),
+        cadence: mode === "vest" ? CADENCE_ID[cadence] : undefined,
+        idempotencyKey: crypto.randomUUID(),
+      });
+      const calls = [prepared.approveTx, prepared.tx].filter((call): call is NonNullable<typeof call> => Boolean(call));
+      const hashes = await sendWalletCalls(walletProvider, address as Address, calls);
+      const confirmed = await confirmDevLock({ actionId: prepared.actionId, txHash: actionTxHash(hashes) });
+      setNotice(`Lock submitted${confirmed.txHash ? ` · ${confirmed.txHash.slice(0, 10)}` : ""}. It appears after the indexer catches the event.`);
+      reloadLocks();
+    } catch (err) {
+      setNotice(actionError(err));
+    } finally {
+      inflight.current = false;
+      setBusy(false);
+    }
   };
 
-  const claim = (_lock: Lock) => {
+  const claim = async (lock: Lock) => {
     if (!connected) {
       connect();
       return;
     }
-    setNotice("On-chain claim is not wired yet.");
+    if (claimableAmount(lock) <= 0) {
+      setNotice("Nothing to claim yet.");
+      return;
+    }
+    if (!walletProvider) {
+      setNotice("Wallet is not ready.");
+      return;
+    }
+    if (inflight.current) return;
+    inflight.current = true;
+    setBusy(true);
+    setNotice("");
+    try {
+      if (activeChainId(chainId) !== robinhoodChain.id) await switchNetwork(robinhoodChain);
+      const prepared = await prepareDevLockClaim({
+        wallet: address,
+        lockId: lock.id,
+        idempotencyKey: crypto.randomUUID(),
+      });
+      const hashes = await sendWalletCalls(walletProvider, address as Address, [prepared.tx]);
+      const confirmed = await confirmDevLockClaim({ actionId: prepared.actionId, txHash: actionTxHash(hashes) });
+      setNotice(`Claim submitted${confirmed.txHash ? ` · ${confirmed.txHash.slice(0, 10)}` : ""}.`);
+      reloadLocks();
+    } catch (err) {
+      setNotice(actionError(err));
+    } finally {
+      inflight.current = false;
+      setBusy(false);
+    }
   };
 
   const schedule = scheduleParts(mode, cliffDays, lengthDays);
@@ -635,7 +749,7 @@ export function DevLock() {
   return (
     <div className="devlock-page">
       <div className="page-head">
-        <PageTitle tip="Lock tokens from coins you launched. Time-based unlocks once. Vesting releases on a schedule. DevLock contract is not deployed yet — create/claim stay off until the address is set.">
+        <PageTitle tip="Lock tokens from coins you launched. Time-based unlocks once. Vesting releases on a schedule. The wallet approves the tokens, then pays the fee lock.">
           Dev Lock
         </PageTitle>
         <SlidingTabs
@@ -822,8 +936,8 @@ export function DevLock() {
 
             {notice ? <p className="devlock-notice">{notice}</p> : null}
 
-            <button type="button" className="devlock-submit" onClick={submit}>
-              {mode === "time" ? "Lock until date" : "Start vesting"}
+            <button type="button" className="devlock-submit" onClick={() => void submit()} disabled={busy}>
+              {busy ? "Confirm in wallet…" : mode === "time" ? "Lock until date" : "Start vesting"}
             </button>
             <p className="devlock-fine">
               A lock cannot be cancelled early. Creating a lock costs a flat {lockFee} ETH Fee Lock. Tokens return to this wallet only as they unlock.
@@ -879,8 +993,8 @@ export function DevLock() {
                         <div className="devlock-row-end">
                           <strong>{formatTokens(lock.amount - lock.claimed)}</strong>
                           <div className="devlock-actions">
-                            {claimable > 1 ? (
-                              <button type="button" className="devlock-claim" onClick={() => claim(lock)}>
+                            {claimable > 0 ? (
+                              <button type="button" className="devlock-claim" disabled={busy} onClick={() => void claim(lock)}>
                                 Claim {formatTokens(claimable)}
                               </button>
                             ) : null}

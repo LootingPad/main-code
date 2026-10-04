@@ -1,7 +1,11 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { getFees, getLaunches, getStakingEvents } from "@/lib/api";
+import { useAppKitNetwork, useAppKitProvider } from "@reown/appkit/react";
+import type { Address, EIP1193Provider } from "viem";
+import { ApiError, confirmCreateStaking, getFees, getLaunches, getStakingEvents, prepareCreateStaking } from "@/lib/api";
+import { robinhoodChain } from "@/lib/chains";
+import { actionTxHash, isUserRejection, providerErrorText, readTokenHolding, sendWalletCalls, toRawAmount } from "@/lib/wallet-calls";
 import { CREATE_STAKING_FEE_ETH } from "@/lib/fees";
 import {
   DAY,
@@ -9,7 +13,6 @@ import {
   formatStakingDate,
   formatStakingTokens,
   STAKING_LOCK_OPTIONS,
-  type StakingEvent,
   type StakingLockId,
 } from "@/lib/staking-events";
 import { useAsyncData } from "@/lib/use-async-data";
@@ -24,10 +27,33 @@ const DURATIONS = [
   { id: "365", label: "1 year", days: 365 },
 ] as const;
 
+const LOCK_BIT: Record<StakingLockId, number> = { flex: 1, "30": 2, "90": 4 };
+const LOCK_INDEX: Record<StakingLockId, 0 | 1 | 2> = { flex: 0, "30": 1, "90": 2 };
+
+function activeChainId(value: number | string | undefined) {
+  if (typeof value === "number") return value;
+  if (typeof value === "string" && value.startsWith("0x")) return Number.parseInt(value, 16);
+  return Number(value);
+}
+
+function actionError(err: unknown) {
+  if (isUserRejection(err)) return "Transaction cancelled.";
+  if (err instanceof ApiError) {
+    if (err.status === 503 || err.code === "CONTRACTS_NOT_CONFIGURED") {
+      return "Staking contracts are not configured yet.";
+    }
+    return err.message || err.code;
+  }
+  const text = providerErrorText(err);
+  return text ? text.slice(0, 180) : "Could not create the staking event.";
+}
+
 export function CreateStaking() {
   const { connected, address, connect } = useWallet();
+  const { walletProvider } = useAppKitProvider<EIP1193Provider>("eip155");
+  const { chainId, switchNetwork } = useAppKitNetwork();
   const { data: launches } = useAsyncData(() => getLaunches({ limit: 100 }), [], { initial: [] });
-  const { data: apiEvents } = useAsyncData(() => getStakingEvents({ limit: 100 }), [], { initial: [] });
+  const { data: apiEvents, reload: reloadEvents } = useAsyncData(() => getStakingEvents({ limit: 100 }), [], { initial: [] });
   const { data: fees } = useAsyncData(() => getFees(), [], {
     initial: null as Awaited<ReturnType<typeof getFees>> | null,
   });
@@ -38,8 +64,11 @@ export function CreateStaking() {
   const [reward, setReward] = useState("1000000");
   const [duration, setDuration] = useState<(typeof DURATIONS)[number]["id"]>("90");
   const [locks, setLocks] = useState<StakingLockId[]>(["flex", "30", "90"]);
-  const [localPools, setLocalPools] = useState<StakingEvent[]>([]);
   const [notice, setNotice] = useState("");
+  const [busy, setBusy] = useState(false);
+  const inflight = useRef(false);
+  const [tokenBalance, setTokenBalance] = useState<number | null>(null);
+  const [tokenDecimals, setTokenDecimals] = useState(18);
   const [tokenOpen, setTokenOpen] = useState(false);
   const [tokenUp, setTokenUp] = useState(false);
   const tokenRef = useRef<HTMLDivElement>(null);
@@ -56,13 +85,33 @@ export function CreateStaking() {
         .slice(0, 20),
     [apiEvents, address],
   );
-  const pools = useMemo(() => [...localPools, ...apiPools], [localPools, apiPools]);
+  const pools = apiPools;
 
   const parsed = Number(reward.replace(/,/g, ""));
   const value = Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
   const durationDays = DURATIONS.find((item) => item.id === duration)?.days ?? 90;
   const endsAt = Date.now() + durationDays * DAY;
-  const ready = Boolean(coin) && value > 0 && locks.length > 0;
+  const ready = Boolean(coin) && value > 0 && locks.length > 0 && (tokenBalance == null || value <= tokenBalance);
+
+  useEffect(() => {
+    if (!connected || !address || !coin?.address) {
+      setTokenBalance(null);
+      return;
+    }
+    let stop = false;
+    void readTokenHolding(coin.address as Address, address as Address)
+      .then((holding) => {
+        if (stop) return;
+        setTokenBalance(holding.ui);
+        setTokenDecimals(holding.decimals);
+      })
+      .catch(() => {
+        if (!stop) setTokenBalance(null);
+      });
+    return () => {
+      stop = true;
+    };
+  }, [connected, address, coin?.address]);
 
   useEffect(() => {
     if (!tokenOpen) return;
@@ -105,22 +154,64 @@ export function CreateStaking() {
     setNotice("");
   };
 
-  const submit = () => {
+  const submit = async () => {
     if (!connected) {
       connect();
       return;
     }
     if (!coin || !ready) {
-      setNotice(locks.length === 0 ? "Pick at least one lock option." : "Enter a reward amount above 0.");
+      if (tokenBalance != null && value > tokenBalance) setNotice("Amount is above the wallet balance.");
+      else setNotice(locks.length === 0 ? "Pick at least one lock option." : "Enter a reward amount above 0.");
       return;
     }
-    setNotice("On-chain create staking is not wired yet — no demo pools are created.");
+    if (!walletProvider) {
+      setNotice("Wallet is not ready.");
+      return;
+    }
+    if (inflight.current) return;
+    inflight.current = true;
+    setBusy(true);
+    setNotice("");
+    try {
+      if (activeChainId(chainId) !== robinhoodChain.id) await switchNetwork(robinhoodChain);
+      const durationSeconds = durationDays * 24 * 60 * 60 - (durationDays >= 365 ? 15 * 60 : 0);
+      const aprBps: [number, number, number] = [0, 0, 0];
+      let lockMask = 0;
+      for (const id of locks) {
+        lockMask |= LOCK_BIT[id];
+        const option = STAKING_LOCK_OPTIONS.find((item) => item.id === id);
+        aprBps[LOCK_INDEX[id]] = (option?.rate ?? 0) * 100;
+      }
+      const prepared = await prepareCreateStaking({
+        wallet: address,
+        stakeToken: coin.address,
+        rewardAmount: toRawAmount(reward, tokenDecimals),
+        endsAt: Math.floor(Date.now() / 1000) + durationSeconds,
+        lockMask,
+        aprBps,
+        idempotencyKey: crypto.randomUUID(),
+      });
+      const calls = [prepared.approveTx, prepared.tx].filter((call): call is NonNullable<typeof call> => Boolean(call));
+      const hashes = await sendWalletCalls(walletProvider, address as Address, calls);
+      const confirmed = await confirmCreateStaking({
+        actionId: prepared.actionId,
+        txHash: actionTxHash(hashes),
+      });
+      setReward("");
+      setNotice(`Staking event submitted${confirmed.txHash ? ` · ${confirmed.txHash.slice(0, 10)}` : ""}. It appears after the indexer catches the event.`);
+      reloadEvents();
+    } catch (err) {
+      setNotice(actionError(err));
+    } finally {
+      inflight.current = false;
+      setBusy(false);
+    }
   };
 
   return (
     <div className="devlock-page">
       <div className="page-head">
-        <PageTitle tip="Spin up a staking event for any LOOTING-launched coin. Fund rewards, pick lock options, set the window. StakingFactory is not deployed on Robinhood yet — create stays disabled until the contract address is set.">
+        <PageTitle tip="Spin up a staking event for any LOOTING-launched coin. Fund rewards, pick lock options, set the window. The wallet approves the reward tokens, then pays the create fee.">
           Create Staking
         </PageTitle>
       </div>
@@ -239,8 +330,8 @@ export function CreateStaking() {
 
             {notice ? <p className="devlock-notice">{notice}</p> : null}
 
-            <button type="button" className="devlock-submit" onClick={submit}>
-              Create staking event
+            <button type="button" className="devlock-submit" onClick={() => void submit()} disabled={busy}>
+              {busy ? "Creating…" : "Create staking event"}
             </button>
             <p className="devlock-fine">
               Creating a vault costs a flat {createFee} ETH create fee. Published events show on the public Staking page so anyone can stake into your pool.
